@@ -2516,6 +2516,9 @@ def generate_posterior_samples_from_marginalized_likelihood(
         pool.close()
         pool.join()
 
+    if use_cache and os.path.exists(cache_filename):
+        os.remove(cache_filename)
+
     new_samples = np.concatenate(
         [np.array(val) for key, val in cached_samples_dict.items() if key != "_samples"]
     )
