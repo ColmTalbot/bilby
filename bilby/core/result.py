@@ -2,12 +2,12 @@ import datetime
 import inspect
 import json
 import os
+import sys
 from collections import namedtuple
 from copy import copy
 from importlib import import_module
 from itertools import product
 import multiprocessing
-from functools import partial
 import numpy as np
 import pandas as pd
 import scipy.stats
@@ -32,9 +32,24 @@ from .prior import Prior, PriorDict, DeltaFunction, ConditionalDeltaFunction
 EXTENSIONS = ["json", "hdf5", "h5", "pickle", "pkl"]
 
 
-def __eval_l(likelihood, params):
-    likelihood.parameters.update(params)
-    return likelihood.log_likelihood()
+def __eval_l(params):
+    from .sampler.base_sampler import _sampling_convenience_dump
+    likelihood = _sampling_convenience_dump.likelihood
+    priors = _sampling_convenience_dump.priors
+
+    ln_l = params.pop("log_likelihood", np.nan)
+    ln_p = params.pop("log_prior", np.nan)
+
+    if likelihood is not None:
+        likelihood.parameters.update(params)
+        ln_l = likelihood.log_likelihood()
+    if priors is not None:
+        for key in ["log_likelihood", "log_prior"]:
+            if key in priors:
+                del priors[key]
+        ln_p = priors.ln_prob(params)
+
+    return ln_l, ln_p
 
 
 def result_file_name(outdir, label, extension='json', gzip=False):
@@ -182,13 +197,17 @@ def get_weights_for_reweighting(
     from tqdm.auto import tqdm
 
     nposterior = len(result.posterior)
+    dict_samples = result.posterior.to_dict(orient="records")
 
     if (resume_file is not None) and os.path.exists(resume_file):
-        old_log_likelihood_array, old_log_prior_array, new_log_likelihood_array, new_log_prior_array = \
-            np.genfromtxt(resume_file)
-
-        starting_index = np.argmin(np.abs(old_log_likelihood_array))
-        logger.info(f'Checkpoint resuming from {starting_index}.')
+        import dill
+        with open(resume_file, "rb") as ff:
+            data = dill.load(ff)
+        old_log_likelihood_array = data["old_ln_l"]
+        old_log_prior_array = data["old_ln_p"]
+        new_log_likelihood_array = data["new_ln_l"]
+        new_log_prior_array = data["old_ln_p"]
+        logger.info(f'Checkpoint resuming from {resume_file}.')
 
     else:
         old_log_likelihood_array = np.zeros(nposterior)
@@ -196,65 +215,67 @@ def get_weights_for_reweighting(
         new_log_likelihood_array = np.zeros(nposterior)
         new_log_prior_array = np.zeros(nposterior)
 
-        starting_index = 0
-
-    dict_samples = [{key: sample[key] for key in result.posterior}
-                    for _, sample in result.posterior.iterrows()]
-    n = len(dict_samples) - starting_index
-
-    # Helper function to compute likelihoods in parallel
-    def eval_pool(this_logl):
-        with multiprocessing.Pool(processes=npool) as pool:
-            chunksize = max(100, n // (2 * npool))
-            return list(tqdm(
-                pool.imap(partial(__eval_l, this_logl),
-                        dict_samples[starting_index:], chunksize=chunksize),
-                desc='Computing likelihoods',
-                total=n)
+    def setup_pool(likelihood, prior):
+        if npool > 1:
+            from .sampler.base_sampler import _initialize_global_variables
+            pool = multiprocessing.Pool(
+                processes=npool,
+                initializer=_initialize_global_variables,
+                initargs=(likelihood, prior, None, None),
             )
-
-    if old_likelihood is None:
-        old_log_likelihood_array[starting_index:] = \
-            result.posterior["log_likelihood"][starting_index:].to_numpy()
-    else:
-        old_log_likelihood_array[starting_index:] = eval_pool(old_likelihood)
-
-    if new_likelihood is None:
-        # Don't perform likelihood reweighting (i.e. likelihood isn't updated)
-        new_log_likelihood_array[starting_index:] = old_log_likelihood_array[starting_index:]
-    else:
-        new_log_likelihood_array[starting_index:] = eval_pool(new_likelihood)
-
-    # Compute priors
-    for ii, sample in enumerate(tqdm(dict_samples[starting_index:],
-                                     desc='Computing priors',
-                                     total=n),
-                                start=starting_index):
-        # prior calculation needs to not have prior or likelihood keys
-        ln_prior = sample.pop("log_prior", np.nan)
-        if "log_likelihood" in sample:
-            del sample["log_likelihood"]
-
-        if old_prior is not None:
-            old_log_prior_array[ii] = old_prior.ln_prob(sample)
+            mapper = pool.map
         else:
-            old_log_prior_array[ii] = ln_prior
+            from .sampler.base_sampler import _sampling_convenience_dump
+            _sampling_convenience_dump.likelihood = likelihood
+            _sampling_convenience_dump.priors = prior
+            pool = None
+            mapper = map
+        return pool, mapper
 
-        if new_prior is not None:
-            new_log_prior_array[ii] = new_prior.ln_prob(sample)
-        else:
-            # Don't perform prior reweighting (i.e. prior isn't updated)
-            new_log_prior_array[ii] = old_log_prior_array[ii]
+    def write_checkpoint():
+        if resume_file is not None:
+            safe_file_dump(dict(
+                old_ln_l=old_log_likelihood_array,
+                old_ln_p=old_log_prior_array,
+                new_ln_l=new_log_likelihood_array,
+                new_ln_p=new_log_prior_array,
+            ), resume_file, "pickle")
 
-        if (ii % (n_checkpoint) == 0) and (resume_file is not None):
-            checkpointed_index = np.argmin(np.abs(old_log_likelihood_array))
-            logger.info(f'Checkpointing with {checkpointed_index} samples')
-            np.savetxt(
-                resume_file,
-                [old_log_likelihood_array, old_log_prior_array, new_log_likelihood_array, new_log_prior_array])
+    for likelihood_array, prior_array, likelihood, prior in [
+        (old_log_likelihood_array, old_log_prior_array, old_likelihood, old_prior),
+        (new_log_likelihood_array, new_log_prior_array, new_likelihood, new_prior),
+    ]:
+        pool, mapper = setup_pool(likelihood, prior)
+        ii = min(
+            np.argmin(np.abs(likelihood_array)),
+            np.argmin(np.abs(prior_array))
+        )
+        pbar = tqdm(total=nposterior - ii, file=sys.stdout)
+        while ii < nposterior:
+            idxs = slice(ii, ii + n_checkpoint)
+            ln_l, ln_p = zip(*mapper(__eval_l, dict_samples[idxs]))
+            likelihood_array[idxs] = ln_l
+            prior_array[idxs] = ln_p
 
-    ln_weights = (
-        new_log_likelihood_array + new_log_prior_array - old_log_likelihood_array - old_log_prior_array)
+            write_checkpoint()
+            ii += n_checkpoint
+            pbar.update(n_checkpoint)
+        if npool > 1:
+            pool.close()
+            pool.join()
+
+    ln_weights = np.zeros(nposterior)
+    if new_likelihood is not None:
+        ln_weights += new_log_likelihood_array - old_log_likelihood_array
+    else:
+        new_log_likelihood_array = old_log_likelihood_array
+    if new_prior is not None:
+        ln_weights += new_log_prior_array - old_log_prior_array
+    else:
+        new_log_prior_array = old_log_prior_array
+
+    if resume_file is not None and os.path.exists(resume_file):
+        os.remove(resume_file)
 
     return ln_weights, new_log_likelihood_array, new_log_prior_array, old_log_likelihood_array, old_log_prior_array
 
