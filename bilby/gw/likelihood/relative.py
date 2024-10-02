@@ -225,7 +225,7 @@ class RelativeBinningGravitationalWaveTransient(GravitationalWaveTransient):
             f"Set up {self.number_of_bins} bins "
             f"between {minimum_frequency} Hz and {maximum_frequency} Hz"
         )
-        self.waveform_generator.waveform_arguments["frequency_bin_edges"] = self.bin_freqs
+        self.waveform_generator.waveform_arguments["frequencies"] = self.bin_freqs
         self.bin_widths = self.bin_freqs[1:] - self.bin_freqs[:-1]
         self.bin_centers = (self.bin_freqs[1:] + self.bin_freqs[:-1]) / 2
         for interferometer in self.interferometers:

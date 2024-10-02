@@ -661,7 +661,7 @@ def binary_black_hole_roq(
         catch_waveform_errors=False, pn_spin_order=-1, pn_tidal_order=-1,
         pn_phase_order=-1, pn_amplitude_order=0)
     waveform_kwargs.update(waveform_arguments)
-    return _base_roq_waveform(
+    return _base_waveform_frequency_sequence(
         frequency_array=frequency_array, mass_1=mass_1, mass_2=mass_2,
         luminosity_distance=luminosity_distance, theta_jn=theta_jn, phase=phase,
         a_1=a_1, a_2=a_2, tilt_1=tilt_1, tilt_2=tilt_2, phi_jl=phi_jl,
@@ -677,7 +677,7 @@ def binary_neutron_star_roq(
         catch_waveform_errors=False, pn_spin_order=-1, pn_tidal_order=-1,
         pn_phase_order=-1, pn_amplitude_order=0)
     waveform_kwargs.update(waveform_arguments)
-    return _base_roq_waveform(
+    return _base_waveform_frequency_sequence(
         frequency_array=frequency_array, mass_1=mass_1, mass_2=mass_2,
         luminosity_distance=luminosity_distance, theta_jn=theta_jn, phase=phase,
         a_1=a_1, a_2=a_2, tilt_1=tilt_1, tilt_2=tilt_2, phi_jl=phi_jl,
@@ -693,7 +693,7 @@ def lal_binary_black_hole_relative_binning(
 
     fiducial: float
         If fiducial=1, waveform evaluated on the full frequency grid is returned.
-        If fiducial=0, waveform evaluated at waveform_kwargs["frequency_bin_edges"]
+        If fiducial=0, waveform evaluated at waveform_kwargs["frequencies"]
         is returned.
     """
 
@@ -703,21 +703,11 @@ def lal_binary_black_hole_relative_binning(
         catch_waveform_errors=False, pn_spin_order=-1, pn_tidal_order=-1,
         pn_phase_order=-1, pn_amplitude_order=0)
     waveform_kwargs.update(kwargs)
-
-    if fiducial == 1:
-        return _base_lal_cbc_fd_waveform(
-            frequency_array=frequency_array, mass_1=mass_1, mass_2=mass_2,
-            luminosity_distance=luminosity_distance, theta_jn=theta_jn, phase=phase,
-            a_1=a_1, a_2=a_2, tilt_1=tilt_1, tilt_2=tilt_2, phi_jl=phi_jl,
-            phi_12=phi_12, lambda_1=0.0, lambda_2=0.0, **waveform_kwargs)
-
-    else:
-        waveform_kwargs["frequencies"] = waveform_kwargs.pop("frequency_bin_edges")
-        return _base_waveform_frequency_sequence(
-            frequency_array=frequency_array, mass_1=mass_1, mass_2=mass_2,
-            luminosity_distance=luminosity_distance, theta_jn=theta_jn, phase=phase,
-            a_1=a_1, a_2=a_2, tilt_1=tilt_1, tilt_2=tilt_2, phi_jl=phi_jl,
-            phi_12=phi_12, lambda_1=0.0, lambda_2=0.0, **waveform_kwargs)
+    return _base_lal_relative_binning_waveform(
+        frequency_array, mass_1, mass_2, luminosity_distance, a_1, tilt_1,
+        phi_12, a_2, tilt_2, phi_jl, 0.0, 0.0, theta_jn, phase,
+        fiducial, **waveform_kwargs
+    )
 
 
 def lal_binary_neutron_star_relative_binning(
@@ -740,117 +730,30 @@ def lal_binary_neutron_star_relative_binning(
         catch_waveform_errors=False, pn_spin_order=-1, pn_tidal_order=-1,
         pn_phase_order=-1, pn_amplitude_order=0)
     waveform_kwargs.update(kwargs)
+    return _base_lal_relative_binning_waveform(
+        frequency_array, mass_1, mass_2, luminosity_distance, a_1, tilt_1,
+        phi_12, a_2, tilt_2, phi_jl, lambda_1, lambda_2, theta_jn, phase,
+        fiducial, **waveform_kwargs
+    )
 
+
+def _base_lal_relative_binning_waveform(
+    frequency_array, mass_1, mass_2, luminosity_distance, a_1, tilt_1,
+    phi_12, a_2, tilt_2, phi_jl, lambda_1, lambda_2, theta_jn, phase,
+    fiducial, **kwargs
+):
     if fiducial == 1:
         return _base_lal_cbc_fd_waveform(
             frequency_array=frequency_array, mass_1=mass_1, mass_2=mass_2,
             luminosity_distance=luminosity_distance, theta_jn=theta_jn, phase=phase,
             a_1=a_1, a_2=a_2, tilt_1=tilt_1, tilt_2=tilt_2, phi_12=phi_12,
-            phi_jl=phi_jl, lambda_1=lambda_1, lambda_2=lambda_2, **waveform_kwargs)
+            phi_jl=phi_jl, lambda_1=lambda_1, lambda_2=lambda_2, **kwargs)
     else:
-        waveform_kwargs["frequencies"] = waveform_kwargs.pop("frequency_bin_edges")
         return _base_waveform_frequency_sequence(
             frequency_array=frequency_array, mass_1=mass_1, mass_2=mass_2,
             luminosity_distance=luminosity_distance, theta_jn=theta_jn, phase=phase,
             a_1=a_1, a_2=a_2, tilt_1=tilt_1, tilt_2=tilt_2, phi_jl=phi_jl,
-            phi_12=phi_12, lambda_1=lambda_1, lambda_2=lambda_2, **waveform_kwargs)
-
-
-def _base_roq_waveform(
-        frequency_array, mass_1, mass_2, luminosity_distance, a_1, tilt_1,
-        phi_12, a_2, tilt_2, lambda_1, lambda_2, phi_jl, theta_jn, phase,
-        **waveform_arguments):
-    """ Base source model for ROQGravitationalWaveTransient, which evaluates
-    waveform values at frequency nodes contained in waveform_arguments. This
-    requires that waveform_arguments contain all of 'frequency_nodes',
-    'linear_indices', and 'quadratic_indices', or both 'frequency_nodes_linear' and
-    'frequency_nodes_quadratic'.
-
-    Parameters
-    ==========
-    frequency_array: np.array
-        This input is ignored for the roq source model
-    mass_1: float
-        The mass of the heavier object in solar masses
-    mass_2: float
-        The mass of the lighter object in solar masses
-    luminosity_distance: float
-        The luminosity distance in megaparsec
-    a_1: float
-        Dimensionless primary spin magnitude
-    tilt_1: float
-        Primary tilt angle
-    phi_12: float
-
-    a_2: float
-        Dimensionless secondary spin magnitude
-    tilt_2: float
-        Secondary tilt angle
-    phi_jl: float
-
-    theta_jn: float
-        Orbital inclination
-    phase: float
-        The phase at reference frequency or peak amplitude (depends on waveform)
-
-    Waveform arguments
-    ===================
-    Non-sampled extra data used in the source model calculation
-    frequency_nodes_linear: np.array
-        frequency nodes for linear likelihood part
-    frequency_nodes_quadratic: np.array
-        frequency nodes for quadratic likelihood part
-    frequency_nodes: np.array
-        unique frequency nodes for linear and quadratic likelihood parts
-    linear_indices: np.array
-        indices to recover frequency nodes for linear part from unique frequency nodes
-    quadratic_indices: np.array
-        indices to recover frequency nodes for quadratic part from unique frequency nodes
-    reference_frequency: float
-    approximant: str
-
-    Note: for the frequency_nodes_linear and frequency_nodes_quadratic arguments,
-    if using data from https://git.ligo.org/lscsoft/ROQ_data, this should be
-    loaded as `np.load(filename).T`.
-
-    Returns
-    =======
-    waveform_polarizations: dict
-        Dict containing plus and cross modes evaluated at the linear and
-        quadratic frequency nodes.
-    """
-    if 'frequency_nodes' not in waveform_arguments:
-        size_linear = len(waveform_arguments['frequency_nodes_linear'])
-        frequency_nodes_combined = np.hstack(
-            (waveform_arguments['frequency_nodes_linear'],
-             waveform_arguments['frequency_nodes_quadratic'])
-        )
-        frequency_nodes_unique, original_indices = np.unique(
-            frequency_nodes_combined, return_inverse=True
-        )
-        linear_indices = original_indices[:size_linear]
-        quadratic_indices = original_indices[size_linear:]
-        waveform_arguments['frequency_nodes'] = frequency_nodes_unique
-        waveform_arguments['linear_indices'] = linear_indices
-        waveform_arguments['quadratic_indices'] = quadratic_indices
-
-    waveform_arguments['frequencies'] = waveform_arguments['frequency_nodes']
-    waveform_polarizations = _base_waveform_frequency_sequence(
-        frequency_array=frequency_array, mass_1=mass_1, mass_2=mass_2,
-        luminosity_distance=luminosity_distance, theta_jn=theta_jn, phase=phase,
-        a_1=a_1, a_2=a_2, tilt_1=tilt_1, tilt_2=tilt_2, phi_jl=phi_jl,
-        phi_12=phi_12, lambda_1=lambda_1, lambda_2=lambda_2, **waveform_arguments)
-
-    return {
-        'linear': {
-            'plus': waveform_polarizations['plus'][waveform_arguments['linear_indices']],
-            'cross': waveform_polarizations['cross'][waveform_arguments['linear_indices']]
-        },
-        'quadratic': {
-            'plus': waveform_polarizations['plus'][waveform_arguments['quadratic_indices']],
-            'cross': waveform_polarizations['cross'][waveform_arguments['quadratic_indices']]
-        }
-    }
+            phi_12=phi_12, lambda_1=lambda_1, lambda_2=lambda_2, **kwargs)
 
 
 def binary_black_hole_frequency_sequence(
@@ -1136,6 +1039,9 @@ def _base_waveform_frequency_sequence(
                 raise
 
     return dict(plus=h_plus.data.data, cross=h_cross.data.data)
+
+
+_base_roq_waveform = _base_waveform_frequency_sequence
 
 
 def sinegaussian(frequency_array, hrss, Q, frequency, **kwargs):

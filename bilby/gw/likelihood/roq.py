@@ -167,7 +167,7 @@ class ROQGravitationalWaveTransient(GravitationalWaveTransient):
         if self.number_of_bases_linear == 1 and self.number_of_bases_quadratic == 1:
             frequency_nodes, linear_indices, quadratic_indices = \
                 self._unique_frequency_nodes_and_inverse[0][0]
-            self._waveform_generator.waveform_arguments['frequency_nodes'] = frequency_nodes
+            self._waveform_generator.waveform_arguments['frequencies'] = frequency_nodes
             self._waveform_generator.waveform_arguments['linear_indices'] = linear_indices
             self._waveform_generator.waveform_arguments['quadratic_indices'] = quadratic_indices
 
@@ -360,7 +360,7 @@ class ROQGravitationalWaveTransient(GravitationalWaveTransient):
         basis_number_quadratic = self._cache['basis_number_quadratic']
         frequency_nodes, linear_indices, quadratic_indices = \
             self._unique_frequency_nodes_and_inverse[basis_number_linear][basis_number_quadratic]
-        self._waveform_generator.waveform_arguments['frequency_nodes'] = frequency_nodes
+        self._waveform_generator.waveform_arguments['frequencies'] = frequency_nodes
         self._waveform_generator.waveform_arguments['linear_indices'] = linear_indices
         self._waveform_generator.waveform_arguments['quadratic_indices'] = quadratic_indices
         self._cache['parameters'] = self.parameters.copy()
@@ -409,7 +409,7 @@ class ROQGravitationalWaveTransient(GravitationalWaveTransient):
         else:
             time_ref = self.parameters['geocent_time']
 
-        frequency_nodes = self.waveform_generator.waveform_arguments['frequency_nodes']
+        frequency_nodes = self.waveform_generator.waveform_arguments['frequencies']
         linear_indices = self.waveform_generator.waveform_arguments['linear_indices']
         quadratic_indices = self.waveform_generator.waveform_arguments['quadratic_indices']
         size_linear = len(linear_indices)
