@@ -412,24 +412,24 @@ class ROQGravitationalWaveTransient(GravitationalWaveTransient):
         frequency_nodes = self.waveform_generator.waveform_arguments['frequencies']
         linear_indices = self.waveform_generator.waveform_arguments['linear_indices']
         quadratic_indices = self.waveform_generator.waveform_arguments['quadratic_indices']
-        size_linear = len(linear_indices)
-        size_quadratic = len(quadratic_indices)
-        h_linear = np.zeros(size_linear, dtype=complex)
-        h_quadratic = np.zeros(size_quadratic, dtype=complex)
-        for mode in waveform_polarizations['linear']:
+        strain = np.zeros(len(frequency_nodes), dtype=complex)
+        for mode in waveform_polarizations:
             response = interferometer.antenna_response(
-                self.parameters['ra'], self.parameters['dec'],
+                self.parameters['ra'],
+                self.parameters['dec'],
                 time_ref,
                 self.parameters['psi'],
-                mode
+                mode,
+                frequency_nodes,
             )
-            h_linear += waveform_polarizations['linear'][mode] * response
-            h_quadratic += waveform_polarizations['quadratic'][mode] * response
+            strain += waveform_polarizations[mode] * response
 
         calib_factor = interferometer.calibration_model.get_calibration_factor(
             frequency_nodes, prefix='recalib_{}_'.format(interferometer.name), **self.parameters)
-        h_linear *= calib_factor[linear_indices]
-        h_quadratic *= calib_factor[quadratic_indices]
+        strain *= calib_factor
+
+        h_linear = strain[linear_indices]
+        h_quadratic = strain[quadratic_indices]
 
         optimal_snr_squared = np.vdot(
             np.abs(h_quadratic)**2,
