@@ -702,10 +702,9 @@ class CompactBinaryCoalescenceResult(CoreResult):
                     format=format, dpi=600
                 )
                 plt.close()
+                rcParams["font.size"] = old_font_size
             logger.debug("Waveform figure saved to {}".format(filename))
-            rcParams["font.size"] = old_font_size
         else:
-            rcParams["font.size"] = old_font_size
             return fig
 
     def plot_skymap(
