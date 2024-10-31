@@ -457,7 +457,12 @@ class Dynesty(NestedSampler):
         sample = self.kwargs["sample"]
         bound = self.kwargs["bound"]
 
-        if sample not in ["rwalk", "act-walk", "acceptance-walk"] and bound in [
+        if sample not in [
+            "rwalk",
+            "act-walk",
+            "acceptance-walk",
+            "acceptance-walk-jax",
+        ] and bound in [
             "live",
             "live-multi",
         ]:
@@ -515,6 +520,14 @@ class Dynesty(NestedSampler):
             from .dynesty_utils import FixedRWalk
 
             dynesty.nestedsamplers._SAMPLING["acceptance-walk"] = FixedRWalk()
+        elif sample == "acceptance-walk-jax":
+            logger.info(
+                f"Using the bilby-implemented {sample} sampling with an average of "
+                f"{self.naccept} accepted steps per MCMC and maximum length {self.maxmcmc}"
+            )
+            from .dynesty_utils import fixed_rwalk_jax
+
+            dynesty.nestedsamplers._SAMPLING["acceptance-walk-jax"] = fixed_rwalk_jax
         elif sample == "act-walk":
             logger.info(
                 f"Using the bilby-implemented {sample} sampling tracking the "

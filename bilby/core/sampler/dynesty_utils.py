@@ -1,12 +1,16 @@
 import warnings
+from functools import partial
 
+import jax
 import numpy as np
 from dynesty.nestedsamplers import MultiEllipsoidSampler, UnitCubeSampler
 from dynesty.utils import apply_reflect, get_random_generator
+from scipy._lib._array_api import array_namespace
 
 from ...bilby_mcmc.chain import calculate_tau
 from ..utils.log import logger
 from .base_sampler import _SamplingContainer
+from .dynesty import _log_likelihood_wrapper, _prior_transform_wrapper
 
 
 class LivePointSampler(UnitCubeSampler):
@@ -50,7 +54,7 @@ class LivePointSampler(UnitCubeSampler):
 
         # update walks to match target naccept
         accept_prob = max(0.5, blob["accept"]) / self.kwargs["walks"]
-        delay = self.nlive // 10 - 1
+        delay = self.nlive // 10 * self.queue_size - 1
         n_target = getattr(_SamplingContainer, "naccept", 60)
         self.walks = (self.walks * delay + n_target / accept_prob) / (delay + 1)
         self.kwargs["walks"] = min(int(np.ceil(self.walks)), _SamplingContainer.maxmcmc)
@@ -131,7 +135,8 @@ class FixedRWalk:
                 u=current_u, **common_kwargs, **proposal_kwargs[prop]
             )
             u_prop = apply_boundaries_(u_prop=u_prop, **boundary_kwargs)
-            if u_prop is None:
+            if np.isnan(u_prop[0]):
+                # if u_prop is None:
                 accepted.append(0)
                 continue
 
@@ -491,6 +496,126 @@ class AcceptanceTrackingRWalk:
         return max(safety, Nmcmc_exact)
 
 
+@jax.jit
+def _eval(u_prop, loglstar):
+    v_prop = _prior_transform_wrapper(u_prop)
+    logl_prop = _log_likelihood_wrapper(v_prop)
+    return jax.lax.select(logl_prop > loglstar, 1, 0)
+    # jax.lax.select(logl_prop > loglstar, u_prop, current_u),
+    #     jax.lax.select(logl_prop > loglstar, 1, 0),
+    # )
+
+
+def _null(*args):
+    return jax.numpy.array(0)
+
+
+@jax.jit
+def step(current_u, loglstar, live, periodic, reflective, rstate):
+    # def step(args, accept):
+    # current_u, loglstar, live, periodic, reflective, rstate = args
+    rstate, subkey = jax.random.split(rstate)
+    u_prop = propose_differetial_evolution(
+        current_u, live, len(current_u), len(current_u), subkey
+    )
+    # u_prop = proposal(u=current_u, live=live)
+    u_prop = apply_boundaries_(u_prop=u_prop, periodic=periodic, reflective=reflective)
+    accept = jax.lax.cond(jax.numpy.isfinite(u_prop[0]), _eval, _null, u_prop, loglstar)
+    current_u = jax.lax.select(accept, u_prop, current_u)
+    # return (
+    #     current_u, loglstar, live, periodic, reflective, rstate
+    # ), accept
+    return (jax.lax.select(accept, u_prop, current_u), accept)
+
+
+def scan_step(args):
+    (
+        current_u,
+        loglstar,
+        live,
+        periodic,
+        reflective,
+        rstate,
+        accepted,
+        ncalls,
+        niter,
+    ) = args
+    rstate, subkey = jax.random.split(rstate)
+    u_prop = propose_differetial_evolution(
+        current_u, live, len(current_u), len(current_u), subkey
+    )
+    u_prop = apply_boundaries_(u_prop=u_prop, periodic=periodic, reflective=reflective)
+    evaluate = jax.lax.select(jax.numpy.isfinite(u_prop[0]), 1, 0)
+    accept = jax.lax.cond(evaluate, _eval, _null, u_prop, loglstar)
+    current_u = jax.lax.select(accept, u_prop, current_u)
+    accepted += accept
+    ncalls += evaluate
+    niter += 1
+    return (
+        current_u,
+        loglstar,
+        live,
+        periodic,
+        reflective,
+        rstate,
+        accepted,
+        ncalls,
+        niter,
+    )
+
+
+@jax.jit
+def fixed_length_mcmc(current_u, loglstar, live, periodic, reflective, rstate, nsteps):
+    return jax.lax.while_loop(
+        lambda x: x[-1] < nsteps,
+        scan_step,
+        (current_u, loglstar, live, periodic, reflective, rstate, 0, 0, 0),
+    )
+
+
+@partial(jax.jit, static_argnames=("prior_transform", "loglikelihood"))
+def fixed_rwalk_jax(
+    u, axes, rseed, prior_transform, loglikelihood, loglstar, scale, kwargs
+):
+    # def fixed_rwalk_jax(args):
+    prng = get_random_generator(rseed)
+    # prng = rseed
+
+    walks = kwargs.get("walks", 1000)
+
+    data = fixed_length_mcmc(
+        jax.numpy.array(u),
+        loglstar,
+        jax.numpy.array(kwargs["live"]),
+        kwargs["periodic"],
+        kwargs["reflective"],
+        prng.key,
+        walks,
+    )
+    naccept = data[-3]
+    ncall = data[-2]
+
+    current_u = jax.lax.select(
+        naccept == 0,
+        prng.uniform(len(data[0])),
+        data[0],
+    )
+
+    xp = array_namespace(current_u)
+    current_v = xp.asarray(prior_transform(current_u))
+    logl = loglikelihood(current_v)
+    # current_v = jax.numpy.asarray(_prior_transform_wrapper(current_u))
+    # logl = _log_likelihood_wrapper(current_v)
+
+    blob = {
+        "accept": naccept,
+        "reject": walks - naccept,
+        "scale": scale,
+    }
+
+    return current_u, current_v, logl, ncall, blob
+
+
 def _get_proposal_kwargs(args):
     """
     Resolve the proposal cycle from the provided keyword arguments.
@@ -616,16 +741,31 @@ def propose_differetial_evolution(
     u_prop: np.ndarray
         The proposed point.
     """
-    delta = np.diff(rstate.choice(live, 2, replace=False), axis=0)[0]
-    if rstate.uniform(0, 1) < mix:
-        if scale is None:
-            scale = 2.38 / (2 * n_cluster) ** 0.5
-        scale *= rstate.gamma(4, 0.25)
-    else:
-        scale = 1
-    u_prop = u.copy()
-    u_prop[:n_cluster] += delta * scale
-    u_prop[n_cluster:] = rstate.uniform(0, 1, n - n_cluster)
+    xp = array_namespace(live)
+    if isinstance(rstate, np.random.Generator):
+        delta = xp.diff(rstate.choice(live, 2, replace=False), axis=0)[0]
+        if rstate.uniform(0, 1) < mix:
+            if scale is None:
+                scale = 2.38 / (2 * n_cluster) ** 0.5
+            scale *= rstate.gamma(4, 0.25)
+        else:
+            scale = 1
+        non_clustered = rstate.uniform(0, 1, n - n_cluster)
+    elif isinstance(rstate, jax.Array):
+        rstate, key1, key2, key3, key4 = jax.random.split(rstate, 5)
+        idxs = jax.random.choice(key1, len(live), (2,), replace=False)
+        delta = xp.diff(live[idxs], axis=0)[0]
+        scale = jax.lax.select(
+            jax.random.uniform(key2) < mix,
+            2.38 / (2 * n_cluster) ** 0.5 * jax.random.gamma(key3, 4) * 0.25,
+            1.0,
+        )
+        non_clustered = jax.random.uniform(key4, (n - n_cluster,))
+    # u_prop = u.copy()
+    # u_prop = u.copy() + delta * scale
+    u_prop = xp.concatenate([u[:n_cluster] + delta * scale, non_clustered])
+    # u_prop[:n_cluster] += delta * scale
+    # u_prop[n_cluster:] = rstate.uniform(0, 1, n - n_cluster)
     return u_prop
 
 
@@ -701,6 +841,7 @@ def apply_boundaries_(u_prop, periodic, reflective):
         Either the remapped proposed point, or None if the proposed point
         lies outside the unit cube.
     """
+    xp = array_namespace(u_prop)
     # Wrap periodic parameters
     if periodic is not None:
         u_prop[periodic] = np.mod(u_prop[periodic], 1)
@@ -709,10 +850,12 @@ def apply_boundaries_(u_prop, periodic, reflective):
     if reflective is not None:
         u_prop[reflective] = apply_reflect(u_prop[reflective])
 
-    if u_prop.min() < 0 or u_prop.max() > 1:
-        return None
-    else:
-        return u_prop
+    in_bounds = xp.all((u_prop >= 0) & (u_prop <= 1))
+    return u_prop + 0 / in_bounds
+    # if u_prop.min() < 0 or u_prop.max() > 1:
+    #     return None
+    # else:
+    #     return u_prop
 
 
 proposal_funcs = dict(diff=propose_differetial_evolution, volumetric=propose_volumetric)

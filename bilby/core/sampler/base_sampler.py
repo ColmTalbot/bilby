@@ -199,7 +199,7 @@ class Sampler(object):
     default_kwargs = dict()
     npool_equiv_kwargs = [
         "npool",
-        "queue_size",
+        # "queue_size",
         "threads",
         "nthreads",
         "cores",
