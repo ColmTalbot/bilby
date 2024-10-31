@@ -1072,7 +1072,8 @@ class GravitationalWaveTransient(Likelihood):
         from ..conversion import convert_orientation_quaternion, convert_cartesian
         if parameters is None:
             parameters = self.parameters
-        convert_orientation_quaternion(parameters)
+        if "orientation_w" in parameters:
+            convert_orientation_quaternion(parameters)
         time = parameters.get(f'{self.time_reference}_time', None)
         if time is None and "geocent_time" in parameters:
             logger.warning(
