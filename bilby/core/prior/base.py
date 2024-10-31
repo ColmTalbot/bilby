@@ -14,6 +14,7 @@ from ..utils import (
     logger,
     get_dict_with_properties,
 )
+from ..utils.backend_utils import xp_wrap
 
 
 class Prior(object):
@@ -116,7 +117,8 @@ class Prior(object):
                     return False
         return True
 
-    def sample(self, size=None):
+    @xp_wrap
+    def sample(self, size=None, *, xp=np):
         """Draw a sample from the prior
 
         Parameters
@@ -131,7 +133,7 @@ class Prior(object):
         """
         from ..utils.random import rng
 
-        self.least_recently_sampled = self.rescale(rng.uniform(0, 1, size))
+        self.least_recently_sampled = self.rescale(xp.asarray(rng.uniform(0, 1, size)))
         return self.least_recently_sampled
 
     def rescale(self, val):
@@ -180,7 +182,8 @@ class Prior(object):
                           fill_value=(0, 1))
         return interp(val)
 
-    def ln_prob(self, val):
+    @xp_wrap
+    def ln_prob(self, val, *, xp=np):
         """Return the prior ln probability of val, this should be overwritten
 
         Parameters
@@ -193,7 +196,7 @@ class Prior(object):
 
         """
         with np.errstate(divide='ignore'):
-            return np.log(self.prob(val))
+            return xp.log(self.prob(val))
 
     def is_in_prior_range(self, val):
         """Returns True if val is in the prior boundaries, zero otherwise

@@ -553,9 +553,11 @@ class PriorDict(dict):
             Joint log probability of all the individual sample probabilities
 
         """
-        ln_prob = np.sum([self[key].ln_prob(sample[key]) for key in sample], axis=axis)
-        return self.check_ln_prob(sample, ln_prob,
-                                  normalized=normalized)
+        ln_prob = sum([self[key].ln_prob(sample[key]) for key in sample])
+        if len(self.constraint_keys) == 0:
+            return ln_prob
+        else:
+            return self.check_ln_prob(sample, ln_prob, normalized=normalized)
 
     def check_ln_prob(self, sample, ln_prob, normalized=True):
         if normalized:
