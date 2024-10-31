@@ -9,7 +9,7 @@ import multiprocessing
 import pickle
 
 import numpy as np
-from bilback.utils import array_module
+from scipy._lib._array_api import array_namespace
 from pandas import DataFrame, Series
 from scipy.stats import norm
 
@@ -180,7 +180,7 @@ def transform_precessing_spins(*args):
 
 
 def convert_orientation_quaternion(parameters):
-    xp = array_module(parameters["orientation_w"])
+    xp = array_namespace(parameters["orientation_w"])
     norm = (
         parameters["orientation_w"]**2
         + parameters["orientation_x"]**2
@@ -207,7 +207,7 @@ def convert_cartesian(parameters, label):
         + parameters[f"{label}_y"]**2
         + parameters[f"{label}_z"]**2
     )**0.5
-    xp = array_module(spin_norm)
+    xp = array_namespace(spin_norm)
     zenith = xp.arccos(parameters[f"{label}_z"] / spin_norm)
     azimuth = xp.arctan2(parameters[f"{label}_y"], parameters[f"{label}_x"])
     return zenith, azimuth
@@ -241,7 +241,7 @@ def convert_to_lal_binary_black_hole_parameters(parameters):
     """
     converted_parameters = parameters.copy()
     original_keys = list(converted_parameters.keys())
-    xp = array_module(parameters[original_keys[0]])
+    xp = array_namespace(parameters[original_keys[0]])
     if 'luminosity_distance' not in original_keys:
         if 'redshift' in converted_parameters.keys():
             converted_parameters['luminosity_distance'] = \
@@ -676,7 +676,7 @@ def spectral_pca_to_spectral(gamma_pca_0, gamma_pca_1, gamma_pca_2, gamma_pca_3)
         array of gamma_0, gamma_1, gamma_2, gamma_3 in model space
 
     '''
-    xp = array_module(gamma_pca_0)
+    xp = array_namespace(gamma_pca_0)
     sampled_pca_gammas = xp.array([gamma_pca_0, gamma_pca_1, gamma_pca_2, gamma_pca_3])
     transformation_matrix = xp.array(
         [
@@ -1090,7 +1090,7 @@ def component_masses_to_symmetric_mass_ratio(mass_1, mass_2):
     symmetric_mass_ratio: float
         Symmetric mass ratio of the binary
     """
-    xp = array_module(mass_1)
+    xp = array_namespace(mass_1)
     return xp.minimum((mass_1 * mass_2) / (mass_1 + mass_2) ** 2, 1 / 4)
 
 
@@ -2113,7 +2113,7 @@ def generate_spin_parameters(sample):
     output_sample = sample.copy()
 
     output_sample = generate_component_spins(output_sample)
-    xp = array_module(sample["spin_1z"])
+    xp = array_namespace(sample["spin_1z"])
 
     output_sample['chi_eff'] = (output_sample['spin_1z'] +
                                 output_sample['spin_2z'] *
@@ -2164,7 +2164,7 @@ def generate_component_spins(sample):
         ['theta_jn', 'phi_jl', 'tilt_1', 'tilt_2', 'phi_12', 'a_1', 'a_2',
          'mass_1', 'mass_2', 'reference_frequency', 'phase']
     if all(key in output_sample.keys() for key in spin_conversion_parameters):
-        xp = array_module(output_sample["theta_jn"])
+        xp = array_namespace(output_sample["theta_jn"])
         (
             output_sample['iota'], output_sample['spin_1x'],
             output_sample['spin_1y'], output_sample['spin_1z'],

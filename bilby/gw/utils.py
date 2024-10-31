@@ -3,12 +3,12 @@ import os
 from functools import lru_cache
 
 import numpy as np
+from array_api_compat import array_namespace
 from scipy.interpolate import interp1d
 from scipy.special import i0e
 from bilback.geometry import zenith_azimuth_to_theta_phi
 from bilback.time import greenwich_mean_sidereal_time
 from bilback.utils import array_module
-from plum import dispatch
 
 from ..core.utils import (logger, run_commandline,
                           check_directory_exists_and_if_not_mkdir,
@@ -1003,7 +1003,6 @@ def plot_spline_pos(log_freqs, samples, nfreqs=100, level=0.9, color='k', label=
     plt.xlim(freq_points.min() - .5, freq_points.max() + 50)
 
 
-@dispatch
 def ln_i0(value):
     """
     A numerically stable method to evaluate ln(I_0) a modified Bessel function
@@ -1019,7 +1018,11 @@ def ln_i0(value):
     array-like:
         The natural logarithm of the bessel function
     """
-    return np.log(i0e(value)) + np.abs(value)
+    if isinstance(value, (float, int)):
+        xp = np
+    else:
+        xp = array_namespace(value)
+    return xp.log(i0e(value)) + xp.abs(value)
 
 
 def calculate_time_to_merger(frequency, mass_1, mass_2, chi=0, safety=1.1):
