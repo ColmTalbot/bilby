@@ -53,10 +53,13 @@ class LivePointSampler(UnitCubeSampler):
 
         # update walks to match target naccept
         accept_prob = max(0.5, blob["accept"]) / self.kwargs["walks"]
-        delay = self.nlive // 10 * self.queue_size - 1
+        delay = self.nlive // 2
         n_target = getattr(_SamplingContainer, "naccept", 60)
         self.walks = (self.walks * delay + n_target / accept_prob) / (delay + 1)
-        self.kwargs["walks"] = min(int(np.ceil(self.walks)), _SamplingContainer.maxmcmc)
+        xp = array_namespace(self.walks)
+        self.kwargs["walks"] = xp.min(
+            int(xp.ceil(self.walks)), _SamplingContainer.maxmcmc
+        )
 
         self.scale = blob["accept"]
 
@@ -534,9 +537,14 @@ def for_step(idx, args, ptform, lnl):
             ),
             axis=1,
         ).squeeze()
-        scale = jax.random.gamma(keys[1], 4, (length // 2,)) * 0.25
+        scale = (
+            jax.random.gamma(keys[1], 4, (length // 2,))
+            * 0.25
+            * 2.38
+            / (2 * points.shape[1]) ** 0.5
+        )
         scale **= jax.random.choice(keys[2], 2, (length // 2,))
-        diffs *= scale[:, None]
+        diffs *= scale[:, None] / 1
         proposed = a + diffs
         accept = jax.vmap(
             partial(_accept, ptform=ptform, lnl=lnl), in_axes=(0, None, None, None)
@@ -567,7 +575,7 @@ def fixed_rwalk_jax(
             kwargs["reflective"],
         ),
     )
-    ncall = walks // 2 * jax.numpy.ones_like(naccept, dtype=jax.numpy.int32)
+    ncall = walks * jax.numpy.ones_like(naccept, dtype=jax.numpy.int32)
 
     current_u = jax.vmap(jax.lax.select)(
         naccept > 0, u, jax.random.uniform(rng_key, u.shape)
@@ -817,18 +825,14 @@ def apply_boundaries_(u_prop, periodic, reflective):
     xp = array_namespace(u_prop)
     # Wrap periodic parameters
     if periodic is not None:
-        u_prop[periodic] = np.mod(u_prop[periodic], 1)
+        u_prop = u_prop.at[periodic].set(xp.mod(u_prop[periodic], 1))
 
     # Reflect
     if reflective is not None:
-        u_prop[reflective] = apply_reflect(u_prop[reflective])
+        u_prop = u_prop.at[reflective].set(apply_reflect(u_prop[reflective]))
 
     in_bounds = xp.all((u_prop >= 0) & (u_prop <= 1))
     return u_prop + 0 / in_bounds
-    # if u_prop.min() < 0 or u_prop.max() > 1:
-    #     return None
-    # else:
-    #     return u_prop
 
 
 proposal_funcs = dict(diff=propose_differetial_evolution, volumetric=propose_volumetric)
