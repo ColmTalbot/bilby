@@ -6,9 +6,11 @@ data with background Gaussian noise
 
 """
 import bilby
+import jax
+import jax.numpy as jnp
 import matplotlib.pyplot as plt
-import numpy as np
 from bilby.core.utils.random import rng, seed
+from dynesty.utils import get_random_generator
 
 # Sets seed of bilby's generator "rng" to "123" to ensure reproducibility
 seed(123)
@@ -33,10 +35,10 @@ injection_parameters = dict(m=0.5, c=0.2)
 # contents of the injection_parameters when calling the model function.
 sampling_frequency = 10
 time_duration = 10
-time = np.arange(0, time_duration, 1 / sampling_frequency)
+time = jnp.arange(0, time_duration, 1 / sampling_frequency)
 N = len(time)
 sigma = rng.normal(1, 0.01, N)
-data = model(time, **injection_parameters) + rng.normal(0, sigma, N)
+data = model(time, **injection_parameters) + jnp.array(rng.normal(0, sigma, N))
 
 # We quickly plot the data to check it looks sensible
 fig, ax = plt.subplots()
@@ -58,15 +60,21 @@ priors["m"] = bilby.core.prior.Uniform(0, 5, "m")
 priors["c"] = bilby.core.prior.Uniform(-2, 2, "c")
 
 # And run sampler
-result = bilby.run_sampler(
-    likelihood=likelihood,
-    priors=priors,
-    sampler="dynesty",
-    nlive=250,
-    injection_parameters=injection_parameters,
-    outdir=outdir,
-    label=label,
-)
+if True:
+    # with jax.log_compiles():
+    # with jax.explain_cache_misses():
+    result = bilby.run_sampler(
+        likelihood=likelihood,
+        priors=priors,
+        sampler="dynesty",
+        nlive=500,
+        injection_parameters=injection_parameters,
+        outdir=outdir,
+        sample="acceptance-walk-jax",
+        label=label,
+        queue_size=500,
+        rstate=get_random_generator(jax.random.PRNGKey(10)),
+    )
 
 # Finally plot a corner plot: all outputs are stored in outdir
 result.plot_corner()

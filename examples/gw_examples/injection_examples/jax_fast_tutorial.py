@@ -19,6 +19,7 @@ import bilby
 import bilby.gw.jaxstuff
 import jax
 import jax.numpy as jnp
+from dynesty.utils import get_random_generator
 from jax import random
 from numpyro.infer import AIES, ESS  # noqa
 from numpyro.infer.ensemble_util import get_nondiagonal_indices
@@ -151,14 +152,17 @@ def main(use_jax, model):
     del priors["mass_1"], priors["mass_2"]
     priors["L1_time"] = bilby.core.prior.Uniform(1126259642.41, 1126259642.45)
     del priors["ra"], priors["dec"]
+    priors["chirp_mass"] = bilby.core.prior.Uniform(20.0, 35.0)
+    priors["mass_ratio"] = bilby.core.prior.Uniform(0.1, 10.0)
+    priors["luminosity_distance"] = bilby.core.prior.PowerLaw(2.0, 10.0, 5000.0)
     # priors["zenith"] = bilby.core.prior.Cosine()
     # priors["azimuth"] = bilby.core.prior.Uniform(minimum=0, maximum=2 * np.pi)
     priors["sky_x"] = bilby.core.prior.Normal(mu=0, sigma=1)
     priors["sky_y"] = bilby.core.prior.Normal(mu=0, sigma=1)
     priors["sky_z"] = bilby.core.prior.Normal(mu=0, sigma=1)
     priors["delta_phase"] = priors.pop("phase")
-    priors["chirp_mass"].minimum = 20
-    priors["chirp_mass"].maximum = 35
+    # priors["chirp_mass"].minimum = 20
+    # priors["chirp_mass"].maximum = 35
     del priors["tilt_1"], priors["tilt_2"], priors["phi_12"], priors["phi_jl"]
     priors["spin_1_x"] = bilby.core.prior.Normal(mu=0, sigma=1)
     priors["spin_1_y"] = bilby.core.prior.Normal(mu=0, sigma=1)
@@ -191,7 +195,7 @@ def main(use_jax, model):
         interferometers=ifos,
         waveform_generator=waveform_generator,
         priors=priors,
-        # phase_marginalization=True,
+        phase_marginalization=True,
         reference_frame=ifos,
         time_reference="L1",
     )
@@ -235,7 +239,9 @@ def main(use_jax, model):
 
     # use the log_compiles context so we can make sure there aren't recompilations
     # inside the sampling loop
-    with jax.log_compiles():
+    if True:
+        # with jax.log_compiles():
+        # with jax.explain_cache_misses():
         result = bilby.run_sampler(
             likelihood=sample_likelihood,
             priors=priors,
@@ -245,34 +251,36 @@ def main(use_jax, model):
             # sampler_name="NUTS",
             num_warmup=500,
             num_samples=500,
-            num_chains=100,
+            # num_chains=100,
             thinning=5,
             # moves={
             #     AIES.DEMove(): 0.35,
             #     ModeHopping(): 0.3,
             #     AIES.StretchMove(): 0.35,
             # },
-            moves={
-                ESS.DifferentialMove(): 0.25,
-                ESS.KDEMove(): 0.25,
-                ESS.GaussianMove(): 0.5,
-            },
+            # moves={
+            #     ESS.DifferentialMove(): 0.25,
+            #     ESS.KDEMove(): 0.25,
+            #     ESS.GaussianMove(): 0.5,
+            # },
             chain_method="vectorized",
             npoints=500,
-            # sample="acceptance-walk",
-            sample="act-walk",
+            sample="acceptance-walk-jax" if use_jax else "acceptance-walk",
+            # sample="act-walk",
             naccept=10,
             injection_parameters=injection_parameters,
             outdir=outdir,
             label=label,
-            npool=4,
+            rstate=get_random_generator(jax.random.PRNGKey(10)) if use_jax else None,
+            queue_size=500,
+            # npool=4,
         )
         # print(result)
         # print(f"Sampling time: {result.sampling_time:.1f}s\n")
 
     # Make a corner plot.
     result.plot_corner()
-    raise SystemExit()
+    # raise SystemExit()
     return result.sampling_time
 
 
@@ -315,6 +323,6 @@ def ModeHopping():
 
 if __name__ == "__main__":
     times = dict()
-    for arg in product([True, False][1:], ["relbin", "mb", "regular"][1:2]):
+    for arg in product([True, False][:], ["relbin", "mb", "regular"][2:]):
         times[arg] = main(*arg)
     print(times)
