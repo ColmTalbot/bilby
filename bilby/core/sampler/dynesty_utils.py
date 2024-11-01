@@ -10,7 +10,6 @@ from scipy._lib._array_api import array_namespace
 from ...bilby_mcmc.chain import calculate_tau
 from ..utils.log import logger
 from .base_sampler import _SamplingContainer
-from .dynesty import _log_likelihood_wrapper, _prior_transform_wrapper
 
 
 class LivePointSampler(UnitCubeSampler):
@@ -68,11 +67,10 @@ class LivePointSampler(UnitCubeSampler):
         We need to make sure the live points are passed to the proposal
         function if we are using live point-based proposals.
         """
-        self.kwargs["nlive"] = self.nlive
-        self.kwargs["live"] = self.live_u
+        xp = array_namespace(self.live_u)
         i = self.rstate.integers(self.nlive)
         u = self.live_u[i, :]
-        return u, np.identity(self.ncdim)
+        return u, xp.identity(self.ncdim)
 
 
 class MultiEllipsoidLivePointSampler(MultiEllipsoidSampler):
@@ -496,10 +494,10 @@ class AcceptanceTrackingRWalk:
         return max(safety, Nmcmc_exact)
 
 
-@jax.jit
-def _eval(u_prop, loglstar):
-    v_prop = _prior_transform_wrapper(u_prop)
-    logl_prop = _log_likelihood_wrapper(v_prop)
+@partial(jax.jit, static_argnames=("ptform", "lnl"))
+def _eval(u_prop, loglstar, ptform, lnl):
+    v_prop = ptform(u_prop)
+    logl_prop = lnl(v_prop)
     return jax.lax.select(logl_prop > loglstar, 1, 0)
 
 
@@ -507,70 +505,73 @@ def _null(*args):
     return jax.numpy.array(0)
 
 
-def _accept(u_prop, periodic, reflective, loglstar):
+@partial(jax.jit, static_argnames=("ptform", "lnl"))
+def _accept(u_prop, periodic, reflective, loglstar, ptform, lnl):
     u_prop = apply_boundaries_(u_prop=u_prop, periodic=periodic, reflective=reflective)
-    return jax.lax.cond(jax.numpy.isfinite(u_prop[0]), _eval, _null, u_prop, loglstar)
+    return jax.lax.cond(
+        jax.numpy.isfinite(u_prop[0]),
+        partial(_eval, ptform=ptform, lnl=lnl),
+        _null,
+        u_prop,
+        loglstar,
+    )
 
 
-@jax.jit
-def for_step(idx, args):
+@partial(jax.jit, static_argnames=("ptform", "lnl"))
+def for_step(idx, args, ptform, lnl):
     points, rng_key, loglstar, naccepted, periodic, reflective = args
     length = points.shape[0]
-    rng_key, *keys = jax.random.split(rng_key, 5)
-    idxs = jax.random.permutation(keys[0], length)
-    a = points[idxs[: length // 2]]
-    b = points[idxs[length // 2 :]]
-    diffs = jax.numpy.diff(
-        jax.vmap(jax.random.choice, in_axes=(0, None, None, None))(
-            jax.random.split(keys[1], length // 2), b, (2,), False
-        ),
-        axis=1,
-    ).squeeze()
-
-    scale = jax.random.gamma(keys[2], 4, (length // 2,)) * 0.25
-    scale **= jax.random.choice(keys[3], 2, (length // 2,))
-    diffs *= scale[:, None]
-    proposed = a + diffs
-    accept = jax.vmap(_accept, in_axes=(0, None, None, None))(
-        proposed, periodic, reflective, loglstar
-    )
-    # accept = jax.vmap(ln_l, in_axes=(0,))(proposed) > loglstar
-    a = a + diffs * accept[:, None]
-    points = points.at[idxs[: length // 2]].set(a)
-    subset = naccepted[idxs[: length // 2]] + accept
-    naccepted = naccepted.at[idxs[: length // 2]].set(subset)
+    rng_key, subkey = jax.random.split(rng_key)
+    idxs = jax.random.permutation(subkey, length)
+    first, second = jax.numpy.split(idxs, 2)
+    for active, passive in [(first, second), (second, first)]:
+        rng_key, *keys = jax.random.split(rng_key, 4)
+        a = points[active]
+        b = points[passive]
+        diffs = jax.numpy.diff(
+            jax.vmap(jax.random.choice, in_axes=(0, None, None, None))(
+                jax.random.split(keys[0], length // 2), b, (2,), False
+            ),
+            axis=1,
+        ).squeeze()
+        scale = jax.random.gamma(keys[1], 4, (length // 2,)) * 0.25
+        scale **= jax.random.choice(keys[2], 2, (length // 2,))
+        diffs *= scale[:, None]
+        proposed = a + diffs
+        accept = jax.vmap(
+            partial(_accept, ptform=ptform, lnl=lnl), in_axes=(0, None, None, None)
+        )(proposed, periodic, reflective, loglstar)
+        a = a + diffs * accept[:, None]
+        points = points.at[active].set(a)
+        subset = naccepted[active] + accept
+        naccepted = naccepted.at[active].set(subset)
     return points, rng_key, loglstar, naccepted, periodic, reflective
 
 
 @partial(jax.jit, static_argnames=("prior_transform", "loglikelihood"))
 def fixed_rwalk_jax(
-    u, axes, rseed, prior_transform, loglikelihood, loglstar, scale, kwargs
+    live, rseed, prior_transform, loglikelihood, loglstar, scale, kwargs
 ):
-    # def fixed_rwalk_jax(args):
-    # prng = get_random_generator(rseed)q
-    # prng = rseed
-
     walks = kwargs.get("walks", 1000)
 
-    # points, rng_key, loglstar, naccepted, periodic, reflective
-    data = jax.lax.fori_loop(
+    u, rng_key, _, naccept, _, _ = jax.lax.fori_loop(
         0,
         walks,
-        for_step,
+        partial(for_step, ptform=prior_transform, lnl=loglikelihood),
         (
-            kwargs["live"],
+            live,
             rseed,
             loglstar,
-            jax.numpy.zeros(len(kwargs["live"])),
+            jax.numpy.zeros(live.shape[0]),
             kwargs["periodic"],
             kwargs["reflective"],
         ),
     )
-    naccept = data[3]
     ncall = walks // 2 * jax.numpy.ones_like(naccept, dtype=jax.numpy.int32)
 
-    current_u = data[0]
-
+    current_u = jax.vmap(jax.lax.select)(
+        naccept > 0, u, jax.random.uniform(rng_key, u.shape)
+    )
     current_v = prior_transform(current_u.T).T
     logl = jax.vmap(loglikelihood)(current_v)
 
@@ -579,7 +580,6 @@ def fixed_rwalk_jax(
         "reject": walks - naccept,
         "scale": scale * jax.numpy.ones_like(naccept),
     }
-    # jax.debug.print("{}", blob)
 
     return current_u, current_v, logl, ncall, blob
 
