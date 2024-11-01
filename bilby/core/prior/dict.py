@@ -609,11 +609,10 @@ class PriorDict(dict):
         =======
         list: List of floats containing the rescaled sample
         """
-        from matplotlib.cbook import flatten
+        from scipy._lib._array_api import array_namespace
+        xp = array_namespace(theta)
 
-        return list(
-            flatten([self[key].rescale(sample) for key, sample in zip(keys, theta)])
-        )
+        return xp.asarray([self[key].rescale(sample) for key, sample in zip(keys, theta)])
 
     def test_redundancy(self, key, disable_logging=False):
         """Empty redundancy test, should be overwritten in subclasses"""

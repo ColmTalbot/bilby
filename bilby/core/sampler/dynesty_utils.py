@@ -564,13 +564,61 @@ def scan_step(args):
     )
 
 
+def _accept(u_prop, periodic, reflective, loglstar):
+    u_prop = apply_boundaries_(u_prop=u_prop, periodic=periodic, reflective=reflective)
+    return jax.lax.cond(jax.numpy.isfinite(u_prop[0]), _eval, _null, u_prop, loglstar)
+
+
 @jax.jit
-def fixed_length_mcmc(current_u, loglstar, live, periodic, reflective, rstate, nsteps):
-    return jax.lax.while_loop(
-        lambda x: x[-1] < nsteps,
-        scan_step,
-        (current_u, loglstar, live, periodic, reflective, rstate, 0, 0, 0),
+def for_step(idx, args):
+    points, rng_key, loglstar, naccepted, periodic, reflective = args
+    length = points.shape[0]
+    rng_key, *keys = jax.random.split(rng_key, 4)
+    idxs = jax.random.permutation(keys[0], length)
+    a = points[idxs[: length // 2]]
+    b = points[idxs[length // 2 :]]
+    diffs = jax.numpy.diff(
+        jax.vmap(jax.random.choice, in_axes=(0, None, None, None))(
+            jax.random.split(keys[1], length // 2), b, (2,), False
+        ),
+        axis=1,
+    ).squeeze()
+    scale = (
+        jax.random.gamma(keys[2], 4, (length // 2,))
+        * 0.25
+        * 2.38
+        / (2 * points.shape[1]) ** 0.5
     )
+    diffs *= scale[:, None]
+    proposed = a + diffs
+    accept = jax.vmap(_accept, in_axes=(0, None, None, None))(
+        proposed, periodic, reflective, loglstar
+    )
+    # accept = jax.vmap(ln_l, in_axes=(0,))(proposed) > loglstar
+    a = a + diffs * accept[:, None]
+    points = points.at[idxs[: length // 2]].set(a)
+    subset = naccepted[idxs[: length // 2]] + accept
+    naccepted = naccepted.at[idxs[: length // 2]].set(subset)
+    return points, rng_key, loglstar, naccepted, periodic, reflective
+
+
+# def for_step(i, args):
+#     return scan_step(args)
+
+
+# @jax.jit
+# def fixed_length_mcmc(current_u, loglstar, live, periodic, reflective, rstate, nsteps):
+#     return jax.lax.fori_loop(
+#         0,
+#         nsteps,
+#         for_step,
+#         (current_u, loglstar, live, periodic, reflective, rstate, 0, 0, 0),
+#     )
+#     # return jax.lax.while_loop(
+#     #     lambda x: x[-1] < nsteps,
+#     #     scan_step,
+#     #     (current_u, loglstar, live, periodic, reflective, rstate, 0, 0, 0),
+#     # )
 
 
 @partial(jax.jit, static_argnames=("prior_transform", "loglikelihood"))
@@ -578,40 +626,56 @@ def fixed_rwalk_jax(
     u, axes, rseed, prior_transform, loglikelihood, loglstar, scale, kwargs
 ):
     # def fixed_rwalk_jax(args):
-    prng = get_random_generator(rseed)
+    # prng = get_random_generator(rseed)q
     # prng = rseed
 
     walks = kwargs.get("walks", 1000)
 
-    data = fixed_length_mcmc(
-        jax.numpy.array(u),
-        loglstar,
-        jax.numpy.array(kwargs["live"]),
-        kwargs["periodic"],
-        kwargs["reflective"],
-        prng.key,
+    # points, rng_key, loglstar, naccepted, periodic, reflective
+    data = jax.lax.fori_loop(
+        0,
         walks,
+        for_step,
+        (
+            kwargs["live"],
+            rseed,
+            loglstar,
+            jax.numpy.zeros(len(kwargs["live"])),
+            kwargs["periodic"],
+            kwargs["reflective"],
+        ),
     )
-    naccept = data[-3]
-    ncall = data[-2]
+    # data = fixed_length_mcmc(
+    #     jax.numpy.array(u),
+    #     loglstar,
+    #     jax.numpy.array(kwargs["live"]),
+    #     kwargs["periodic"],
+    #     kwargs["reflective"],
+    #     prng.key,
+    #     walks,
+    # )
+    naccept = data[3]
+    ncall = walks // 2 * jax.numpy.ones_like(naccept, dtype=jax.numpy.int32)
 
-    current_u = jax.lax.select(
-        naccept == 0,
-        prng.uniform(len(data[0])),
-        data[0],
-    )
+    # current_u = jax.lax.select(
+    #     naccept == 0,
+    #     prng.uniform(len(data[0])),
+    #     data[0],
+    # )
+    current_u = data[0]
 
-    xp = array_namespace(current_u)
-    current_v = xp.asarray(prior_transform(current_u))
-    logl = loglikelihood(current_v)
+    # xp = array_namespace(current_u)
+    current_v = jax.numpy.asarray(jax.vmap(prior_transform)(current_u)).T
+    logl = jax.vmap(loglikelihood)(current_v)
     # current_v = jax.numpy.asarray(_prior_transform_wrapper(current_u))
     # logl = _log_likelihood_wrapper(current_v)
 
     blob = {
         "accept": naccept,
         "reject": walks - naccept,
-        "scale": scale,
+        "scale": scale * jax.numpy.ones_like(naccept),
     }
+    # jax.debug.print("{}", blob)
 
     return current_u, current_v, logl, ncall, blob
 
