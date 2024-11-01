@@ -173,11 +173,12 @@ class PowerLaw(Prior):
     @xp_wrap
     def cdf(self, val, *, xp=np):
         if self.alpha == -1:
-            _cdf = (xp.log(val / self.minimum) /
-                    xp.log(self.maximum / self.minimum))
+            _cdf = xp.log(val / self.minimum) / xp.log(self.maximum / self.minimum)
         else:
-            _cdf = np.atleast_1d(val ** (self.alpha + 1) - self.minimum ** (self.alpha + 1)) / \
-                (self.maximum ** (self.alpha + 1) - self.minimum ** (self.alpha + 1))
+            _cdf = (
+                val ** (self.alpha + 1) - self.minimum ** (self.alpha + 1)
+                / (self.maximum ** (self.alpha + 1) - self.minimum ** (self.alpha + 1))
+            )
         _cdf = xp.clip(_cdf, 0, 1)
         return _cdf
 

@@ -501,67 +501,10 @@ def _eval(u_prop, loglstar):
     v_prop = _prior_transform_wrapper(u_prop)
     logl_prop = _log_likelihood_wrapper(v_prop)
     return jax.lax.select(logl_prop > loglstar, 1, 0)
-    # jax.lax.select(logl_prop > loglstar, u_prop, current_u),
-    #     jax.lax.select(logl_prop > loglstar, 1, 0),
-    # )
 
 
 def _null(*args):
     return jax.numpy.array(0)
-
-
-@jax.jit
-def step(current_u, loglstar, live, periodic, reflective, rstate):
-    # def step(args, accept):
-    # current_u, loglstar, live, periodic, reflective, rstate = args
-    rstate, subkey = jax.random.split(rstate)
-    u_prop = propose_differetial_evolution(
-        current_u, live, len(current_u), len(current_u), subkey
-    )
-    # u_prop = proposal(u=current_u, live=live)
-    u_prop = apply_boundaries_(u_prop=u_prop, periodic=periodic, reflective=reflective)
-    accept = jax.lax.cond(jax.numpy.isfinite(u_prop[0]), _eval, _null, u_prop, loglstar)
-    current_u = jax.lax.select(accept, u_prop, current_u)
-    # return (
-    #     current_u, loglstar, live, periodic, reflective, rstate
-    # ), accept
-    return (jax.lax.select(accept, u_prop, current_u), accept)
-
-
-def scan_step(args):
-    (
-        current_u,
-        loglstar,
-        live,
-        periodic,
-        reflective,
-        rstate,
-        accepted,
-        ncalls,
-        niter,
-    ) = args
-    rstate, subkey = jax.random.split(rstate)
-    u_prop = propose_differetial_evolution(
-        current_u, live, len(current_u), len(current_u), subkey
-    )
-    u_prop = apply_boundaries_(u_prop=u_prop, periodic=periodic, reflective=reflective)
-    evaluate = jax.lax.select(jax.numpy.isfinite(u_prop[0]), 1, 0)
-    accept = jax.lax.cond(evaluate, _eval, _null, u_prop, loglstar)
-    current_u = jax.lax.select(accept, u_prop, current_u)
-    accepted += accept
-    ncalls += evaluate
-    niter += 1
-    return (
-        current_u,
-        loglstar,
-        live,
-        periodic,
-        reflective,
-        rstate,
-        accepted,
-        ncalls,
-        niter,
-    )
 
 
 def _accept(u_prop, periodic, reflective, loglstar):
@@ -573,7 +516,7 @@ def _accept(u_prop, periodic, reflective, loglstar):
 def for_step(idx, args):
     points, rng_key, loglstar, naccepted, periodic, reflective = args
     length = points.shape[0]
-    rng_key, *keys = jax.random.split(rng_key, 4)
+    rng_key, *keys = jax.random.split(rng_key, 5)
     idxs = jax.random.permutation(keys[0], length)
     a = points[idxs[: length // 2]]
     b = points[idxs[length // 2 :]]
@@ -583,12 +526,9 @@ def for_step(idx, args):
         ),
         axis=1,
     ).squeeze()
-    scale = (
-        jax.random.gamma(keys[2], 4, (length // 2,))
-        * 0.25
-        * 2.38
-        / (2 * points.shape[1]) ** 0.5
-    )
+
+    scale = jax.random.gamma(keys[2], 4, (length // 2,)) * 0.25
+    scale **= jax.random.choice(keys[3], 2, (length // 2,))
     diffs *= scale[:, None]
     proposed = a + diffs
     accept = jax.vmap(_accept, in_axes=(0, None, None, None))(
@@ -600,25 +540,6 @@ def for_step(idx, args):
     subset = naccepted[idxs[: length // 2]] + accept
     naccepted = naccepted.at[idxs[: length // 2]].set(subset)
     return points, rng_key, loglstar, naccepted, periodic, reflective
-
-
-# def for_step(i, args):
-#     return scan_step(args)
-
-
-# @jax.jit
-# def fixed_length_mcmc(current_u, loglstar, live, periodic, reflective, rstate, nsteps):
-#     return jax.lax.fori_loop(
-#         0,
-#         nsteps,
-#         for_step,
-#         (current_u, loglstar, live, periodic, reflective, rstate, 0, 0, 0),
-#     )
-#     # return jax.lax.while_loop(
-#     #     lambda x: x[-1] < nsteps,
-#     #     scan_step,
-#     #     (current_u, loglstar, live, periodic, reflective, rstate, 0, 0, 0),
-#     # )
 
 
 @partial(jax.jit, static_argnames=("prior_transform", "loglikelihood"))
@@ -645,30 +566,13 @@ def fixed_rwalk_jax(
             kwargs["reflective"],
         ),
     )
-    # data = fixed_length_mcmc(
-    #     jax.numpy.array(u),
-    #     loglstar,
-    #     jax.numpy.array(kwargs["live"]),
-    #     kwargs["periodic"],
-    #     kwargs["reflective"],
-    #     prng.key,
-    #     walks,
-    # )
     naccept = data[3]
     ncall = walks // 2 * jax.numpy.ones_like(naccept, dtype=jax.numpy.int32)
 
-    # current_u = jax.lax.select(
-    #     naccept == 0,
-    #     prng.uniform(len(data[0])),
-    #     data[0],
-    # )
     current_u = data[0]
 
-    # xp = array_namespace(current_u)
-    current_v = jax.numpy.asarray(jax.vmap(prior_transform)(current_u)).T
+    current_v = prior_transform(current_u.T).T
     logl = jax.vmap(loglikelihood)(current_v)
-    # current_v = jax.numpy.asarray(_prior_transform_wrapper(current_u))
-    # logl = _log_likelihood_wrapper(current_v)
 
     blob = {
         "accept": naccept,
@@ -820,8 +724,13 @@ def propose_differetial_evolution(
         idxs = jax.random.choice(key1, len(live), (2,), replace=False)
         delta = xp.diff(live[idxs], axis=0)[0]
         scale = jax.lax.select(
+            scale is None,
+            2.38 / (2 * n_cluster) ** 0.5,
+            scale,
+        )
+        scale = jax.lax.select(
             jax.random.uniform(key2) < mix,
-            2.38 / (2 * n_cluster) ** 0.5 * jax.random.gamma(key3, 4) * 0.25,
+            scale * jax.random.gamma(key3, 4) * 0.25,
             1.0,
         )
         non_clustered = jax.random.uniform(key4, (n - n_cluster,))

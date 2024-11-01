@@ -5,6 +5,7 @@ from importlib import import_module
 from io import open as ioopen
 
 import numpy as np
+from scipy._lib._array_api import array_namespace
 
 from .analytical import DeltaFunction
 from .base import Prior, Constraint
@@ -839,10 +840,9 @@ class ConditionalPriorDict(PriorDict):
         =======
         list: List of floats containing the rescaled sample
         """
-        from matplotlib.cbook import flatten
+        xp = array_namespace(theta)
 
         keys = list(keys)
-        theta = list(theta)
         self._check_resolved()
         self._update_rescale_keys(keys)
         result = dict()
@@ -853,7 +853,7 @@ class ConditionalPriorDict(PriorDict):
                 theta[index], **self.get_required_variables(key)
             )
             self[key].least_recently_sampled = result[key]
-        return list(flatten([result[key] for key in keys]))
+        return xp.array([result[key] for key in keys])
 
     def _update_rescale_keys(self, keys):
         if not keys == self._least_recently_rescaled_keys:
