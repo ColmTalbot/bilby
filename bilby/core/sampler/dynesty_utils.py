@@ -53,7 +53,7 @@ class LivePointSampler(UnitCubeSampler):
             self.rebuild = False
 
         # update walks to match target naccept
-        accept_prob = max(0.5, blob["accept"]) / self.kwargs["walks"]
+        accept_prob = max(0.5, blob["accept"]) / (blob["accept"] + blob["reject"])
         delay = self.nlive // 2
         n_target = getattr(_SamplingContainer, "naccept", 60)
         self.walks = (self.walks * delay + n_target / accept_prob) / (delay + 1)
@@ -595,7 +595,7 @@ def fixed_rwalk_jax(
     )
     current_v = prior_transform(current_u.T).T
     logl = jax.vmap(loglikelihood)(current_v)
-    jax.debug.print("{}", naccept)
+    jax.debug.print("mean accepted: {}", jax.numpy.mean(naccept))
 
     blob = {
         "accept": naccept,
