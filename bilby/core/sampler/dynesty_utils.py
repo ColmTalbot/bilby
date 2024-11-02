@@ -5,6 +5,7 @@ import jax
 import numpy as np
 from dynesty.nestedsamplers import MultiEllipsoidSampler, UnitCubeSampler
 from dynesty.utils import apply_reflect, get_random_generator
+from jax.scipy.special import erf, erfinv
 from scipy._lib._array_api import array_namespace
 
 from ...bilby_mcmc.chain import calculate_tau
@@ -56,10 +57,7 @@ class LivePointSampler(UnitCubeSampler):
         delay = self.nlive // 2
         n_target = getattr(_SamplingContainer, "naccept", 60)
         self.walks = (self.walks * delay + n_target / accept_prob) / (delay + 1)
-        xp = array_namespace(self.walks)
-        self.kwargs["walks"] = xp.min(
-            int(xp.ceil(self.walks)), _SamplingContainer.maxmcmc
-        )
+        self.kwargs["walks"] = min(int(np.ceil(self.walks)), _SamplingContainer.maxmcmc)
 
         self.scale = blob["accept"]
 
@@ -499,7 +497,7 @@ class AcceptanceTrackingRWalk:
 
 @partial(jax.jit, static_argnames=("ptform", "lnl"))
 def _eval(u_prop, loglstar, ptform, lnl):
-    v_prop = ptform(u_prop)
+    v_prop = ptform(norm_to_unif(u_prop))
     logl_prop = lnl(v_prop)
     return jax.lax.select(logl_prop > loglstar, 1, 0)
 
@@ -510,7 +508,6 @@ def _null(*args):
 
 @partial(jax.jit, static_argnames=("ptform", "lnl"))
 def _accept(u_prop, periodic, reflective, loglstar, ptform, lnl):
-    u_prop = apply_boundaries_(u_prop=u_prop, periodic=periodic, reflective=reflective)
     return jax.lax.cond(
         jax.numpy.isfinite(u_prop[0]),
         partial(_eval, ptform=ptform, lnl=lnl),
@@ -528,7 +525,7 @@ def for_step(idx, args, ptform, lnl):
     idxs = jax.random.permutation(subkey, length)
     first, second = jax.numpy.split(idxs, 2)
     for active, passive in [(first, second), (second, first)]:
-        rng_key, *keys = jax.random.split(rng_key, 4)
+        rng_key, *keys = jax.random.split(rng_key, 5)
         a = points[active]
         b = points[passive]
         diffs = jax.numpy.diff(
@@ -549,11 +546,26 @@ def for_step(idx, args, ptform, lnl):
         accept = jax.vmap(
             partial(_accept, ptform=ptform, lnl=lnl), in_axes=(0, None, None, None)
         )(proposed, periodic, reflective, loglstar)
+        ln_mh = (
+            jax.numpy.sum(a**2, axis=-1) / 2
+            - jax.numpy.sum(proposed**2, axis=-1) / 2
+        )
+        accept = accept & (
+            jax.numpy.exp(ln_mh) > jax.random.uniform(keys[3], accept.shape)
+        )
         a = a + diffs * accept[:, None]
         points = points.at[active].set(a)
         subset = naccepted[active] + accept
         naccepted = naccepted.at[active].set(subset)
     return points, rng_key, loglstar, naccepted, periodic, reflective
+
+
+def unif_to_norm(val):
+    return erfinv(2 * val - 1) * 2**0.5
+
+
+def norm_to_unif(val):
+    return (erf(val / 2**0.5) + 1) / 2
 
 
 @partial(jax.jit, static_argnames=("prior_transform", "loglikelihood"))
@@ -567,7 +579,7 @@ def fixed_rwalk_jax(
         walks,
         partial(for_step, ptform=prior_transform, lnl=loglikelihood),
         (
-            live,
+            unif_to_norm(live),
             rseed,
             loglstar,
             jax.numpy.zeros(live.shape[0]),
@@ -575,6 +587,7 @@ def fixed_rwalk_jax(
             kwargs["reflective"],
         ),
     )
+    u = norm_to_unif(u)
     ncall = walks * jax.numpy.ones_like(naccept, dtype=jax.numpy.int32)
 
     current_u = jax.vmap(jax.lax.select)(
@@ -582,6 +595,7 @@ def fixed_rwalk_jax(
     )
     current_v = prior_transform(current_u.T).T
     logl = jax.vmap(loglikelihood)(current_v)
+    jax.debug.print("{}", naccept)
 
     blob = {
         "accept": naccept,
