@@ -5,10 +5,13 @@ from functools import lru_cache
 import numpy as np
 from scipy.interpolate import interp1d
 from scipy.special import i0e
-from bilby_cython.geometry import (
-    zenith_azimuth_to_theta_phi as _zenith_azimuth_to_theta_phi,
-)
-from bilby_cython.time import greenwich_mean_sidereal_time
+try:
+    from bilby_cython.geometry import (
+        zenith_azimuth_to_theta_phi as _zenith_azimuth_to_theta_phi,
+    )
+    from bilby_cython.time import greenwich_mean_sidereal_time
+except ImportError:
+    print("Failed to import bilby.cython")
 
 from ..core.utils import (logger, run_commandline,
                           check_directory_exists_and_if_not_mkdir,
