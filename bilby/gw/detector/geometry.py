@@ -1,5 +1,4 @@
 import numpy as np
-from bilby_cython.geometry import calculate_arm, detector_tensor
 
 from .. import utils as gwutils
 
@@ -264,6 +263,8 @@ class InterferometerGeometry(object):
         if not self._x_updated or not self._y_updated:
             _, _ = self.x, self.y  # noqa
         if not self._detector_tensor_updated:
+            from bilby_cython.geometry import detector_tensor
+
             self._detector_tensor = detector_tensor(x=self.x, y=self.y)
             self._detector_tensor_updated = True
         return self._detector_tensor
@@ -288,6 +289,7 @@ class InterferometerGeometry(object):
         ValueError: If arm is neither 'x' nor 'y'
 
         """
+        from bilby_cython.geometry import calculate_arm
         if arm == 'x':
             return calculate_arm(
                 arm_tilt=self._xarm_tilt,
