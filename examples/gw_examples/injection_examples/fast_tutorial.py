@@ -9,7 +9,6 @@ between luminosity distances of 100Mpc and 5Gpc, the cosmology is Planck15.
 """
 
 import bilby
-import numpy as np
 
 # Set the duration and sampling frequency of the data segment that we're
 # going to inject the signal into
@@ -20,10 +19,10 @@ minimum_frequency = 20
 # Specify the output directory and the name of the simulation.
 outdir = "outdir"
 label = "fast_tutorial"
-bilby.core.utils.setup_logger(outdir=outdir, label=label)
+bilby.core.utils.setup_logger(outdir=outdir, label=label, log_level="DEBUG")
 
 # Set up a random seed for result reproducibility.  This is optional!
-np.random.seed(88170235)
+bilby.core.utils.random.seed(88170235)
 
 # We are going to inject a binary black hole waveform.  We first establish a
 # dictionary of parameters that includes all of the different waveform
@@ -120,6 +119,7 @@ result = bilby.run_sampler(
     injection_parameters=injection_parameters,
     outdir=outdir,
     label=label,
+    result_class=bilby.gw.result.CBCResult,
 )
 
 # Make a corner plot.

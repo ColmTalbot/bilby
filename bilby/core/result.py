@@ -6,7 +6,8 @@ from collections import namedtuple
 from copy import copy
 from importlib import import_module
 from itertools import product
-
+import multiprocessing
+from functools import partial
 import numpy as np
 import pandas as pd
 import scipy.stats
@@ -23,11 +24,18 @@ from .utils import (
     recursively_load_dict_contents_from_group,
     recursively_decode_bilby_json,
     safe_file_dump,
+    random,
+    string_to_boolean,
 )
 from .prior import Prior, PriorDict, DeltaFunction, ConditionalDeltaFunction
 
 
 EXTENSIONS = ["json", "hdf5", "h5", "pickle", "pkl"]
+
+
+def __eval_l(likelihood, params):
+    likelihood.parameters.update(params)
+    return likelihood.log_likelihood()
 
 
 def result_file_name(outdir, label, extension='json', gzip=False):
@@ -62,7 +70,11 @@ def result_file_name(outdir, label, extension='json', gzip=False):
 def _determine_file_name(filename, outdir, label, extension, gzip):
     """ Helper method to determine the filename """
     if filename is not None:
-        return filename
+        if isinstance(filename, os.PathLike):
+            # convert PathLike object to string
+            return str(filename)
+        else:
+            return filename
     else:
         if (outdir is None) and (label is None):
             raise ValueError("No information given to load file")
@@ -70,7 +82,7 @@ def _determine_file_name(filename, outdir, label, extension, gzip):
             return result_file_name(outdir, label, extension, gzip)
 
 
-def read_in_result(filename=None, outdir=None, label=None, extension='json', gzip=False):
+def read_in_result(filename=None, outdir=None, label=None, extension='json', gzip=False, result_class=None):
     """ Reads in a stored bilby result object
 
     Parameters
@@ -80,9 +92,17 @@ def read_in_result(filename=None, outdir=None, label=None, extension='json', gzi
     outdir, label, extension: str
         Name of the output directory, label and extension used for the default
         naming scheme.
-
+    result_class: bilby.core.result.Result, or child of
+        The result class to use. By default, `bilby.core.result.Result` is used,
+        but objects which inherit from this class can be given providing
+        additional methods.
     """
     filename = _determine_file_name(filename, outdir, label, extension, gzip)
+
+    if result_class is None:
+        result_class = Result
+    elif not issubclass(result_class, Result):
+        raise ValueError(f"Input result_class={result_class} not understood")
 
     # Get the actual extension (may differ from the default extension if the filename is given)
     extension = os.path.splitext(filename)[1].lstrip('.')
@@ -90,11 +110,11 @@ def read_in_result(filename=None, outdir=None, label=None, extension='json', gzi
         extension = os.path.splitext(os.path.splitext(filename)[0])[1].lstrip('.')
 
     if 'json' in extension:
-        result = Result.from_json(filename=filename)
+        result = result_class.from_json(filename=filename)
     elif ('hdf5' in extension) or ('h5' in extension):
-        result = Result.from_hdf5(filename=filename)
+        result = result_class.from_hdf5(filename=filename)
     elif ("pkl" in extension) or ("pickle" in extension):
-        result = Result.from_pickle(filename=filename)
+        result = result_class.from_pickle(filename=filename)
     elif extension is None:
         raise ValueError("No filetype extension provided")
     else:
@@ -102,9 +122,47 @@ def read_in_result(filename=None, outdir=None, label=None, extension='json', gzi
     return result
 
 
+def read_in_result_list(filename_list, invalid="warning"):
+    """ Read in a set of results
+
+    Parameters
+    ==========
+    filename_list: list
+        A list of filename paths
+    invalid: str (ignore, warning, error)
+        Behaviour if a file in filename_list is not a valid bilby result
+
+    Returns
+    -------
+    result_list: ResultList
+        A list of results
+    """
+    results_list = []
+    for filename in filename_list:
+        if (
+            not os.path.exists(filename)
+            and os.path.exists(f"{os.path.splitext(filename)[0]}.pkl")
+        ):
+            pickle_path = f"{os.path.splitext(filename)[0]}.pkl"
+            logger.warning(
+                f"Result file {filename} doesn't exist but {pickle_path} does. "
+                f"Using {pickle_path}."
+            )
+            filename = pickle_path
+        try:
+            results_list.append(read_in_result(filename=filename))
+        except Exception as e:
+            msg = f"Failed to read in file {filename} due to exception {e}"
+            if invalid == "error":
+                raise ResultListError(msg)
+            elif invalid == "warning":
+                logger.warning(msg)
+    return ResultList(results_list)
+
+
 def get_weights_for_reweighting(
         result, new_likelihood=None, new_prior=None, old_likelihood=None,
-        old_prior=None, resume_file=None, n_checkpoint=5000):
+        old_prior=None, resume_file=None, n_checkpoint=5000, npool=1):
     """ Calculate the weights for reweight()
 
     See bilby.core.result.reweight() for help with the inputs
@@ -136,7 +194,9 @@ def get_weights_for_reweighting(
 
         starting_index = np.argmin(np.abs(old_log_likelihood_array))
         logger.info(f'Checkpoint resuming from {starting_index}.')
-
+    elif resume_file is not None:
+        basedir = os.path.split(resume_file)[0]
+        check_directory_exists_and_if_not_mkdir(basedir)
     else:
         old_log_likelihood_array = np.zeros(nposterior)
         old_log_prior_array = np.zeros(nposterior)
@@ -145,30 +205,50 @@ def get_weights_for_reweighting(
 
         starting_index = 0
 
-    for ii, sample in tqdm(result.posterior.iloc[starting_index:].iterrows()):
-        # Convert sample to dictionary
-        par_sample = {key: sample[key] for key in result.posterior}
+    dict_samples = [{key: sample[key] for key in result.posterior}
+                    for _, sample in result.posterior.iterrows()]
+    n = len(dict_samples) - starting_index
 
-        if old_likelihood is not None:
-            old_likelihood.parameters.update(par_sample)
-            old_log_likelihood_array[ii] = old_likelihood.log_likelihood()
-        else:
-            old_log_likelihood_array[ii] = sample["log_likelihood"]
+    # Helper function to compute likelihoods in parallel
+    def eval_pool(this_logl):
+        with multiprocessing.Pool(processes=npool) as pool:
+            chunksize = max(100, n // (2 * npool))
+            return list(tqdm(
+                pool.imap(partial(__eval_l, this_logl),
+                        dict_samples[starting_index:], chunksize=chunksize),
+                desc='Computing likelihoods',
+                total=n)
+            )
 
-        if new_likelihood is not None:
-            new_likelihood.parameters.update(par_sample)
-            new_log_likelihood_array[ii] = new_likelihood.log_likelihood()
-        else:
-            # Don't perform likelihood reweighting (i.e. likelihood isn't updated)
-            new_log_likelihood_array[ii] = old_log_likelihood_array[ii]
+    if old_likelihood is None:
+        old_log_likelihood_array[starting_index:] = \
+            result.posterior["log_likelihood"][starting_index:].to_numpy()
+    else:
+        old_log_likelihood_array[starting_index:] = eval_pool(old_likelihood)
+
+    if new_likelihood is None:
+        # Don't perform likelihood reweighting (i.e. likelihood isn't updated)
+        new_log_likelihood_array[starting_index:] = old_log_likelihood_array[starting_index:]
+    else:
+        new_log_likelihood_array[starting_index:] = eval_pool(new_likelihood)
+
+    # Compute priors
+    for ii, sample in enumerate(tqdm(dict_samples[starting_index:],
+                                     desc='Computing priors',
+                                     total=n),
+                                start=starting_index):
+        # prior calculation needs to not have prior or likelihood keys
+        ln_prior = sample.pop("log_prior", np.nan)
+        if "log_likelihood" in sample:
+            del sample["log_likelihood"]
 
         if old_prior is not None:
-            old_log_prior_array[ii] = old_prior.ln_prob(par_sample)
+            old_log_prior_array[ii] = old_prior.ln_prob(sample)
         else:
-            old_log_prior_array[ii] = sample["log_prior"]
+            old_log_prior_array[ii] = ln_prior
 
         if new_prior is not None:
-            new_log_prior_array[ii] = new_prior.ln_prob(par_sample)
+            new_log_prior_array[ii] = new_prior.ln_prob(sample)
         else:
             # Don't perform prior reweighting (i.e. prior isn't updated)
             new_log_prior_array[ii] = old_log_prior_array[ii]
@@ -202,7 +282,7 @@ def rejection_sample(posterior, weights):
         The posterior resampled using rejection sampling
 
     """
-    keep = weights > np.random.uniform(0, max(weights), weights.shape)
+    keep = weights > random.rng.uniform(0, max(weights), weights.shape)
     return posterior[keep]
 
 
@@ -272,7 +352,7 @@ def reweight(result, label=None, new_likelihood=None, new_prior=None,
         get_weights_for_reweighting(
             result, new_likelihood=new_likelihood, new_prior=new_prior,
             old_likelihood=old_likelihood, old_prior=old_prior,
-            resume_file=resume_file, n_checkpoint=n_checkpoint)
+            resume_file=resume_file, n_checkpoint=n_checkpoint, npool=npool)
 
     if use_nested_samples:
         ln_weights += np.log(result.posterior["weights"])
@@ -402,6 +482,8 @@ class Result(object):
         self.injection_parameters = injection_parameters
         self.posterior = posterior
         self.samples = samples
+        if isinstance(nested_samples, dict):
+            nested_samples = pd.DataFrame(nested_samples)
         self.nested_samples = nested_samples
         self.walkers = walkers
         self.nburn = nburn
@@ -422,6 +504,18 @@ class Result(object):
 
         self.prior_values = None
         self._kde = None
+
+        if not string_to_boolean(os.getenv("BILBY_INCLUDE_GLOBAL_META_DATA", "False")):
+            gmd = self.meta_data.pop("global_meta_data", None)
+            if gmd is not None:
+                logger.info(
+                    "Global meta data was removed from the result object for compatibility. "
+                    "Use the `BILBY_INCLUDE_GLOBAL_METADATA` environment variable to include it. "
+                    "This behaviour will be removed in a future release. "
+                    "For more details see: https://bilby-dev.github.io/bilby/faq.html#global-meta-data"
+                )
+        else:
+            logger.debug("Including global meta data in the result object.")
 
     _load_doctstring = """ Read in a saved .{format} data file
 
@@ -674,9 +768,8 @@ class Result(object):
         return dictionary
 
     def save_to_file(self, filename=None, overwrite=False, outdir=None,
-                     extension='json', gzip=False):
+                     extension=None, gzip=False):
         """
-
         Writes the Result to a file.
 
         Supported formats are: `json`, `hdf5`, `pickle`
@@ -690,22 +783,45 @@ class Result(object):
             default=False
         outdir: str, optional
             Path to the outdir. Default is the one stored in the result object.
-        extension: str, optional {json, hdf5, pkl, pickle, True}
-            Determines the method to use to store the data (if True defaults
-            to json)
+            If given, overwrite path prefix in 'filename'.
+        extension: {"json", "hdf5", "pkl", None}, optional
+            Determines the method to use to store the data. If None, the extension
+            is inferred from the filename if provided, otherwise defaults to 'json'.
         gzip: bool, optional
             If true, and outputting to a json file, this will gzip the resulting
             file and add '.gz' to the file extension.
         """
 
-        if extension is True:
-            extension = "json"
+        _outdir = None
+        if filename is not None:
+            _outdir, base_filename = os.path.split(filename)
+            _outdir = None if _outdir == "" else _outdir
+            base, ext = os.path.splitext(base_filename)
+            if extension is None:
+                extension = ext[1:] if ext else "json"
+                filename = base_filename
+            elif extension is True:
+                message = "Result.save_to_file called with extension=True. "
+                if len(ext) > 0:
+                    message += f"Overwriting extension to json from {ext}, this"
+                else:
+                    message += "This"
+                message += " behaviour is deprecated and will be removed."
+                logger.warning(message)
+                extension = "json"
+                filename = base_filename
+            filename = f"{base}.{extension}"
+        if extension is None or extension is True:
+            extension = 'json'
 
+        outdir = _outdir if outdir is None else outdir
         outdir = self._safe_outdir_creation(outdir, self.save_to_file)
         if filename is None:
-            filename = result_file_name(outdir, self.label, extension, gzip)
+            output_path = result_file_name(outdir, self.label, extension, gzip)
+        else:
+            output_path = os.path.join(outdir, filename)
 
-        move_old_file(filename, overwrite)
+        move_old_file(output_path, overwrite)
 
         # Convert the prior to a string representation for saving on disk
         dictionary = self._get_save_data_dictionary()
@@ -724,27 +840,27 @@ class Result(object):
                     import gzip
                     # encode to a string
                     json_str = json.dumps(dictionary, cls=BilbyJsonEncoder).encode('utf-8')
-                    with gzip.GzipFile(filename, 'w') as file:
+                    with gzip.GzipFile(output_path, 'w') as file:
                         file.write(json_str)
                 else:
-                    with open(filename, 'w') as file:
+                    with open(output_path, 'w') as file:
                         json.dump(dictionary, file, indent=2, cls=BilbyJsonEncoder)
             elif extension == 'hdf5':
                 import h5py
                 dictionary["__module__"] = self.__module__
                 dictionary["__name__"] = self.__class__.__name__
-                with h5py.File(filename, 'w') as h5file:
+                with h5py.File(output_path, 'w') as h5file:
                     recursively_save_dict_contents_to_group(h5file, '/', dictionary)
             elif extension == 'pkl':
-                safe_file_dump(self, filename, "dill")
+                safe_file_dump(self, output_path, "dill")
             else:
-                raise ValueError("Extension type {} not understood".format(extension))
+                raise ValueError(f"Extension type {extension} not understood")
         except Exception as e:
-            filename = ".".join(filename.split(".")[:-1]) + ".pkl"
-            safe_file_dump(self, filename, "dill")
+            output_path = f"{os.path.splitext(output_path)[0]}.pkl"
+            safe_file_dump(self, output_path, "dill")
             logger.error(
                 "\n\nSaving the data has failed with the following message:\n"
-                "{}\nData has been dumped to {}.\n\n".format(e, filename)
+                f"{e}\nData has been dumped to {output_path}.\n\n"
             )
 
     def save_posterior_samples(self, filename=None, outdir=None, label=None):
@@ -944,6 +1060,7 @@ class Result(object):
         import matplotlib.pyplot as plt
         logger.info('Plotting {} marginal distribution'.format(key))
         label = self.get_latex_labels_from_parameter_keys([key])[0]
+        label = sanity_check_labels([label])[0]
         fig, ax = plt.subplots()
         try:
             ax.hist(self.posterior[key].values, bins=bins, density=True,
@@ -1118,21 +1235,32 @@ class Result(object):
         if utils.command_line_args.bilby_test_mode:
             return
 
-        # bilby default corner kwargs. Overwritten by anything passed to kwargs
         defaults_kwargs = dict(
-            bins=50, smooth=0.9, label_kwargs=dict(fontsize=16),
+            bins=50, smooth=0.9,
             title_kwargs=dict(fontsize=16), color='#0072C1',
             truth_color='tab:orange', quantiles=[0.16, 0.84],
             levels=(1 - np.exp(-0.5), 1 - np.exp(-2), 1 - np.exp(-9 / 2.)),
             plot_density=False, plot_datapoints=True, fill_contours=True,
-            max_n_ticks=3, hist_kwargs=dict(density=True))
+            max_n_ticks=3)
 
         if 'lionize' in kwargs and kwargs['lionize'] is True:
             defaults_kwargs['truth_color'] = 'tab:blue'
             defaults_kwargs['color'] = '#FF8C00'
 
+        label_kwargs_defaults = dict(fontsize=16)
+        hist_kwargs_defaults = dict(density=True)
+
+        label_kwargs_input = kwargs.get("label_kwargs", dict())
+        hist_kwargs_input = kwargs.get("hist_kwargs", dict())
+
+        label_kwargs_defaults.update(label_kwargs_input)
+        hist_kwargs_defaults.update(hist_kwargs_input)
+
         defaults_kwargs.update(kwargs)
         kwargs = defaults_kwargs
+
+        kwargs["label_kwargs"] = label_kwargs_defaults
+        kwargs["hist_kwargs"] = hist_kwargs_defaults
 
         # Handle if truths was passed in
         if 'truth' in kwargs:
@@ -1432,8 +1560,7 @@ class Result(object):
         if keys is None:
             keys = self.search_parameter_keys
         if self.injection_parameters is None:
-            raise (
-                TypeError,
+            raise TypeError(
                 "Result object has no 'injection_parameters'. "
                 "Cannot compute credible levels."
             )
@@ -1617,13 +1744,17 @@ class Result(object):
             =======
             azdata: InferenceData
                 The ArviZ InferenceData object.
+
+            Raises
+            ======
+            RuntimeError: If ArviZ is not installed.
         """
 
         try:
             import arviz as az
         except ImportError:
-            logger.debug(
-                "ArviZ is not installed, so cannot convert to InferenceData"
+            raise ResultError(
+                "ArviZ is not installed, so cannot convert to InferenceData."
             )
 
         posdict = {}
@@ -1675,7 +1806,7 @@ class Result(object):
 
 class ResultList(list):
 
-    def __init__(self, results=None):
+    def __init__(self, results=None, consistency_level="warning"):
         """ A class to store a list of :class:`bilby.core.result.Result` objects
         from equivalent runs on the same data. This provides methods for
         outputting combined results.
@@ -1684,8 +1815,15 @@ class ResultList(list):
         ==========
         results: list
             A list of `:class:`bilby.core.result.Result`.
+        consistency_level: str, [ignore, warning, error]
+            If warning, print a warning if inconsistencies are discovered
+            between the results. If error, raise an error if inconsistencies
+            are discovered between the results before combining. If ignore, do
+            nothing.
+
         """
         super(ResultList, self).__init__()
+        self.consistency_level = consistency_level
         for result in results:
             self.append(result)
 
@@ -1702,7 +1840,7 @@ class ResultList(list):
 
         if isinstance(result, Result):
             super(ResultList, self).append(result)
-        elif isinstance(result, str):
+        elif isinstance(result, (str, os.PathLike)):
             super(ResultList, self).append(read_in_result(result))
         else:
             raise TypeError("Could not append a non-Result type")
@@ -1716,9 +1854,11 @@ class ResultList(list):
         ----------
         shuffle: bool
             If true, shuffle the samples when combining, otherwise they are concatenated.
-        consistency_level: str, [warning, error]
-            If warning, print a warning if inconsistencies are discovered between the results before combining.
-            If error, raise an error if inconsistencies are discovered between the results before combining.
+        consistency_level: str, [ignore, warning, error]
+            Overwrite the class level consistency_level. If warning, print a
+            warning if inconsistencies are discovered between the results. If
+            error, raise an error if inconsistencies are discovered between
+            the results before combining. If ignore, do nothing.
 
         Returns
         -------
@@ -1802,7 +1942,7 @@ class ResultList(list):
         result_weights = np.exp(log_evidences - np.max(log_evidences))
         posteriors = list()
         for res, frac in zip(self, result_weights):
-            selected_samples = (np.random.uniform(size=len(res.posterior)) < frac)
+            selected_samples = (random.rng.uniform(size=len(res.posterior)) < frac)
             posteriors.append(res.posterior[selected_samples])
 
         # remove original nested_samples
@@ -1863,6 +2003,8 @@ class ResultList(list):
             raise ResultListError(msg)
         elif self.consistency_level == "warning":
             logger.warning(msg)
+        elif self.consistency_level == "ignore":
+            pass
         else:
             raise ValueError(f"Input consistency_level {self.consistency_level} not understood")
 
@@ -1897,7 +2039,8 @@ class ResultList(list):
 
 @latex_plot_format
 def plot_multiple(results, filename=None, labels=None, colours=None,
-                  save=True, evidences=False, corner_labels=None, **kwargs):
+                  save=True, evidences=False, corner_labels=None, linestyles=None,
+                  fig=None, **kwargs):
     """ Generate a corner plot overlaying two sets of results
 
     Parameters
@@ -1927,6 +2070,10 @@ def plot_multiple(results, filename=None, labels=None, colours=None,
         Bayes factor will be used instead.
     corner_labels: list, optional
         List of strings to be passed to the input `labels` to `result.plot_corner`.
+    linestyles: list, optional
+        List of linestyle strings to plot the results with.
+    fig: figure, optional
+        Figure onto which the results are plotted.
 
     Returns
     =======
@@ -1942,7 +2089,7 @@ def plot_multiple(results, filename=None, labels=None, colours=None,
     if corner_labels is not None:
         kwargs['labels'] = corner_labels
 
-    fig = results[0].plot_corner(save=False, **kwargs)
+    fig = results[0].plot_corner(fig=fig, save=False, **kwargs)
     default_filename = '{}/{}'.format(results[0].outdir, 'combined')
     lines = []
     default_labels = []
@@ -1951,11 +2098,17 @@ def plot_multiple(results, filename=None, labels=None, colours=None,
             c = colours[i]
         else:
             c = 'C{}'.format(i)
+        if linestyles is not None:
+            linestyle = linestyles[i]
+        else:
+            linestyle = 'solid'
         hist_kwargs = kwargs.get('hist_kwargs', dict())
         hist_kwargs['color'] = c
-        fig = result.plot_corner(fig=fig, save=False, color=c, **kwargs)
+        hist_kwargs["linestyle"] = linestyle
+        kwargs["hist_kwargs"] = hist_kwargs
+        fig = result.plot_corner(fig=fig, save=False, color=c, contour_kwargs={"linestyles": linestyle}, **kwargs)
         default_filename += '_{}'.format(result.label)
-        lines.append(mpllines.Line2D([0], [0], color=c))
+        lines.append(mpllines.Line2D([0], [0], color=c, linestyle=linestyle))
         default_labels.append(result.label)
 
     # Rescale the axes
@@ -2090,7 +2243,7 @@ def make_pp_plot(results, filename=None, save=True, confidence_interval=[0.68, 0
 
         try:
             name = results[0].priors[key].latex_label
-        except AttributeError:
+        except (AttributeError, KeyError):
             name = key
         label = "{} ({:2.3f})".format(name, pvalue)
         plt.plot(x_values, pp, lines[ii], label=label, **kwargs)
@@ -2123,7 +2276,8 @@ def sanity_check_labels(labels):
     """ Check labels for plotting to remove matplotlib errors """
     for ii, lab in enumerate(labels):
         if "_" in lab and "$" not in lab:
-            labels[ii] = lab.replace("_", "-")
+            lab = lab.replace("_", "-")
+        labels[ii] = lab.replace("\\\\", "\\")
     return labels
 
 

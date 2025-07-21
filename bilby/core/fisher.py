@@ -7,7 +7,7 @@ from scipy.optimize import differential_evolution
 from .utils.log import logger
 
 
-def get_initial_maximimum_posterior_sample(likelihood, priors, keys, beta=1, n_attempts=1):
+def get_initial_maximum_posterior_sample(likelihood, priors, keys, beta=1, n_attempts=1):
     """A method to attempt optimization of the maximum likelihood
 
     This uses a simple scipy optimization approach, starting from a number
@@ -72,8 +72,17 @@ class FisherMatrixPosteriorEstimator(object):
         self.n_prior_samples = n_prior_samples
         self.N = len(self.parameter_names)
 
-        self.priors = priors
-        self.prior_width_dict = {key: np.max(priors[key].width) for key in self.parameter_names}
+        self.prior_samples = [
+            priors.sample_subset(self.parameter_names) for _ in range(n_prior_samples)
+        ]
+        self.prior_bounds = [(priors[key].minimum, priors[key].maximum) for key in self.parameter_names]
+
+        self.prior_width_dict = {}
+        for key in self.parameter_names:
+            width = priors[key].width
+            if np.isnan(width):
+                raise ValueError(f"Prior width is ill-formed for {key}")
+            self.prior_width_dict[key] = width
 
     def log_likelihood(self, sample):
         self.likelihood.parameters.update(sample)
@@ -91,28 +100,18 @@ class FisherMatrixPosteriorEstimator(object):
         return iFIM
 
     def sample_array(self, sample, n=1):
+        from .utils import random
+
         if sample == "maxL":
-            sample = get_initial_maximimum_posterior_sample(
-                likelihood=self.likelihood,
-                priors=self.priors,
-                keys=self.parameter_names,
-            )
+            sample = self.get_maximum_likelihood_sample()
 
         self.mean = np.array(list(sample.values()))
         self.iFIM = self.calculate_iFIM(sample)
-        return np.random.multivariate_normal(self.mean, self.iFIM, n)
+        return random.rng.multivariate_normal(self.mean, self.iFIM, n)
 
     def sample_dataframe(self, sample, n=1):
         samples = self.sample_array(sample, n)
         return pd.DataFrame(samples, columns=self.parameter_names)
-
-    def get_first_order_derivative(self, sample, key):
-        p = self.shift_sample_x(sample, key, 1)
-        m = self.shift_sample_x(sample, key, -1)
-        dx = .5 * (p[key] - m[key])
-        loglp = self.log_likelihood(p)
-        loglm = self.log_likelihood(m)
-        return (loglp - loglm) / dx
 
     def calculate_FIM(self, sample):
         FIM = np.zeros((self.N, self.N))
@@ -181,7 +180,7 @@ class FisherMatrixPosteriorEstimator(object):
         shift_sample[y_key] = vy + y_coef * dvy
         return shift_sample
 
-    def get_maximimum_likelihood_sample(self, initial_sample=None):
+    def get_maximum_likelihood_sample(self, initial_sample=None):
         """ A method to attempt optimization of the maximum likelihood
 
         This uses a simple scipy optimization approach, starting from a number
@@ -192,7 +191,7 @@ class FisherMatrixPosteriorEstimator(object):
         is large or the prior is wide relative to the prior, the method fails
         to find the global maximum in high dimensional problems.
         """
-        return get_initial_maximimum_posterior_sample(
+        return get_initial_maximum_posterior_sample(
             likelihood=self.likelihood,
             priors=self.priors,
             keys=self.parameter_names,

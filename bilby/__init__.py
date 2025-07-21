@@ -9,9 +9,9 @@ estimation. It is primarily designed and built for inference of compact
 binary coalescence events in interferometric data, but it can also be used for
 more general problems.
 
-The code, and many examples are hosted at https://git.ligo.org/lscsoft/bilby.
+The code, and many examples are hosted at https://github.com/bilby-dev/bilby.
 For installation instructions see
-https://lscsoft.docs.ligo.org/bilby/installation.html.
+https://bilby-dev.github.io/bilby/installation.html.
 
 """
 
@@ -23,6 +23,7 @@ from . import core, gw, hyper
 from .core import utils, likelihood, prior, result, sampler
 from .core.sampler import run_sampler
 from .core.likelihood import Likelihood
+from .core.result import read_in_result, read_in_result_list
 
 try:
     from ._version import version as __version__

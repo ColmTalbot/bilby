@@ -55,17 +55,17 @@ class TabularEOS(object):
     """
 
     def __init__(self, eos, sampling_flag=False, warning_flag=False):
-        from scipy.integrate import cumtrapz
+        from scipy.integrate import cumulative_trapezoid
 
         self.sampling_flag = sampling_flag
         self.warning_flag = warning_flag
 
-        if type(eos) == str:
+        if isinstance(eos, str):
             if eos in valid_eos_dict.keys():
                 table = np.loadtxt(valid_eos_dict[eos])
             else:
                 table = np.loadtxt(eos)
-        elif type(eos) == np.ndarray:
+        elif isinstance(eos, np.ndarray):
             table = eos
         else:
             raise ValueError("eos provided is invalid type please supply a str name, str path to ASCII file, "
@@ -83,7 +83,7 @@ class TabularEOS(object):
             self.warning_flag = True
         else:
             integrand = self.pressure / (self.energy_density + self.pressure)
-            self.pseudo_enthalpy = cumtrapz(integrand, np.log(self.pressure), initial=0) + integrand[0]
+            self.pseudo_enthalpy = cumulative_trapezoid(integrand, np.log(self.pressure), initial=0) + integrand[0]
 
             self.interp_energy_density_from_pressure = CubicSpline(np.log10(self.pressure),
                                                                    np.log10(self.energy_density),

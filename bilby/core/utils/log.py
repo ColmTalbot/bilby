@@ -3,6 +3,7 @@ import logging
 from pathlib import Path
 import subprocess
 import sys
+from importlib import metadata
 
 logger = logging.getLogger('bilby')
 
@@ -22,7 +23,7 @@ def setup_logger(outdir='.', label=None, log_level='INFO', print_version=False):
         If true, print version information
     """
 
-    if type(log_level) is str:
+    if isinstance(log_level, str):
         try:
             level = getattr(logging, log_level.upper())
         except AttributeError:
@@ -34,14 +35,14 @@ def setup_logger(outdir='.', label=None, log_level='INFO', print_version=False):
     logger.propagate = False
     logger.setLevel(level)
 
-    if any([type(h) == logging.StreamHandler for h in logger.handlers]) is False:
+    if not any([isinstance(h, logging.StreamHandler) for h in logger.handlers]):
         stream_handler = logging.StreamHandler()
         stream_handler.setFormatter(logging.Formatter(
             '%(asctime)s %(name)s %(levelname)-8s: %(message)s', datefmt='%H:%M'))
         stream_handler.setLevel(level)
         logger.addHandler(stream_handler)
 
-    if any([type(h) == logging.FileHandler for h in logger.handlers]) is False:
+    if not any([isinstance(h, logging.FileHandler) for h in logger.handlers]):
         if label:
             Path(outdir).mkdir(parents=True, exist_ok=True)
             log_file = '{}/{}.log'.format(outdir, label)
@@ -69,8 +70,11 @@ def loaded_modules_dict():
     module_names = list(sys.modules.keys())
     vdict = {}
     for key in module_names:
-        if "." not in str(key):
-            vdict[key] = str(getattr(sys.modules[key], "__version__", "N/A"))
+        if "." not in key:
+            try:
+                vdict[key] = metadata.version(key)
+            except metadata.PackageNotFoundError:
+                continue
     return vdict
 
 

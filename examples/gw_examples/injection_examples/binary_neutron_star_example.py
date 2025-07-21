@@ -10,15 +10,16 @@ tidal deformabilities
 
 
 import bilby
-import numpy as np
+from bilby.core.utils.random import seed
+
+# Sets seed of bilby's generator "rng" to "123" to ensure reproducibility
+seed(123)
 
 # Specify the output directory and the name of the simulation.
 outdir = "outdir"
 label = "bns_example"
 bilby.core.utils.setup_logger(outdir=outdir, label=label)
 
-# Set up a random seed for result reproducibility.  This is optional!
-np.random.seed(88170235)
 
 # We are going to inject a binary neutron star waveform.  We first establish a
 # dictionary of parameters that includes all of the different waveform
@@ -78,7 +79,7 @@ interferometers.inject_signal(
 
 # Load the default prior for binary neutron stars.
 # We're going to sample in chirp_mass, symmetric_mass_ratio, lambda_tilde, and
-# delta_lambda rather than mass_1, mass_2, lambda_1, and lambda_2.
+# delta_lambda_tilde rather than mass_1, mass_2, lambda_1, and lambda_2.
 # BNS have aligned spins by default, if you want to allow precessing spins
 # pass aligned_spin=False to the BNSPriorDict
 priors = bilby.gw.prior.BNSPriorDict()
@@ -102,8 +103,9 @@ priors["symmetric_mass_ratio"] = bilby.core.prior.Uniform(
     0.1, 0.25, name="symmetric_mass_ratio"
 )
 priors["lambda_tilde"] = bilby.core.prior.Uniform(0, 5000, name="lambda_tilde")
-priors["delta_lambda"] = bilby.core.prior.Uniform(-500, 1000, name="delta_lambda")
-
+priors["delta_lambda_tilde"] = bilby.core.prior.Uniform(
+    -500, 1000, name="delta_lambda_tilde"
+)
 priors["lambda_1"] = bilby.core.prior.Constraint(
     name="lambda_1", minimum=0, maximum=10000
 )
@@ -129,6 +131,7 @@ result = bilby.run_sampler(
     outdir=outdir,
     label=label,
     conversion_function=bilby.gw.conversion.generate_all_bns_parameters,
+    result_class=bilby.gw.result.CBCResult,
 )
 
 result.plot_corner()

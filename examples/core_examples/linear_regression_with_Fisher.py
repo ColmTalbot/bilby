@@ -10,10 +10,13 @@ import copy
 
 import bilby
 import numpy as np
+from bilby.core.utils import random
 
 # A few simple setup steps
 outdir = "outdir"
 
+# sets seed of bilby's generator "rng" to "123"
+random.seed(123)
 np.random.seed(123)
 
 
@@ -33,8 +36,8 @@ sampling_frequency = 10
 time_duration = 10
 time = np.arange(0, time_duration, 1 / sampling_frequency)
 N = len(time)
-sigma = np.random.normal(1, 0.01, N)
-data = model(time, **injection_parameters) + np.random.normal(0, sigma, N)
+sigma = random.rng.normal(1, 0.01, N)
+data = model(time, **injection_parameters) + random.normal(0, sigma, N)
 
 # Now lets instantiate a version of our GaussianLikelihood, giving it
 # the time, data and signal model
@@ -51,14 +54,11 @@ priors = bilby.core.prior.PriorDict(priors)
 result = bilby.run_sampler(
     likelihood=likelihood,
     priors=priors,
-    sampler="bilby_mcmc",
+    sampler="dynesty",
+    nlive=1000,
     injection_parameters=injection_parameters,
     outdir=outdir,
-    label="MCMC",
-    initial_sample_method="maximize",
-    proposal_cycle="defaultnoKDnoUNnoDEnoAG",
-    printdt=10,
-    nsamples=5000,
+    label="Nested Sampling",
 )
 
 # Finally plot a corner plot: all outputs are stored in outdir

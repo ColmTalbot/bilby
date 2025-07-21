@@ -4,11 +4,15 @@ import pandas as pd
 import shutil
 import os
 import json
+import pytest
+from unittest.mock import patch
 
 import bilby
+from bilby.core.result import ResultError
 
 
 class TestJson(unittest.TestCase):
+
     def setUp(self):
         self.encoder = bilby.core.utils.BilbyJsonEncoder
         self.decoder = bilby.core.utils.decode_bilby_json
@@ -48,6 +52,12 @@ class TestJson(unittest.TestCase):
 
 
 class TestResult(unittest.TestCase):
+
+    @pytest.fixture(autouse=True)
+    def init_outdir(self, tmp_path):
+        # Use pytest's tmp_path fixture to create a temporary directory
+        self.outdir = str(tmp_path / "test")
+
     def setUp(self):
         np.random.seed(7)
         bilby.utils.command_line_args.bilby_test_mode = False
@@ -61,7 +71,7 @@ class TestResult(unittest.TestCase):
         )
         result = bilby.core.result.Result(
             label="label",
-            outdir="outdir",
+            outdir=self.outdir,
             sampler="nestle",
             search_parameter_keys=["x", "y"],
             fixed_parameter_keys=["c", "d"],
@@ -87,7 +97,7 @@ class TestResult(unittest.TestCase):
     def tearDown(self):
         bilby.utils.command_line_args.bilby_test_mode = True
         try:
-            shutil.rmtree(self.result.outdir)
+            shutil.rmtree(self.outdir)
         except OSError:
             pass
         del self.result
@@ -271,6 +281,19 @@ class TestResult(unittest.TestCase):
         self.result.save_to_file(overwrite=False, extension=extension)
         self.assertTrue(os.path.isfile(f"{self.result.outdir}/{self.result.label}_result.{extension}.old"))
 
+    def _save_with_outdir_and_filename(self, filename, outdir, template):
+        self.result.save_to_file(filename=filename, outdir=outdir, extension="json", gzip=False)
+        self.assertTrue(os.path.isfile(template))
+
+    def test_save_with_outdir_and_filename(self):
+        self._save_with_outdir_and_filename("out/result", "out2", "out2/result.json")
+        self._save_with_outdir_and_filename("out/result", None, "out/result.json")
+        self._save_with_outdir_and_filename("result", "out", "out/result.json")
+        self._save_with_outdir_and_filename(
+            "result", None, os.path.join(self.result.outdir, "result.json"))
+        self._save_with_outdir_and_filename(
+            None, "out", os.path.join("out", f"{self.result.label}_result.json"))
+
     def test_save_and_overwrite_json(self):
         self._save_and_overwrite_test(extension='json')
 
@@ -422,8 +445,11 @@ class TestResult(unittest.TestCase):
 
     def test_get_credible_levels_raises_error_if_no_injection_parameters(self):
         self.result.injection_parameters = None
-        with self.assertRaises(TypeError):
+        with self.assertRaises(TypeError) as error_context:
             self.result.get_all_injection_credible_levels()
+        self.assertTrue(
+            "Result object has no 'injection_parameters" in str(error_context.exception)
+        )
 
     def test_kde(self):
         kde = self.result.kde
@@ -490,6 +516,72 @@ class TestResult(unittest.TestCase):
         az = self.result.to_arviz()
         self.assertTrue(np.array_equal(az.log_likelihood["log_likelihood"].values.squeeze(),
                                        log_likelihood))
+
+    @patch("builtins.__import__")
+    def test_to_arviz_not_installed(self, mock_import):
+
+        def import_side_effect(name, *args):
+            if name == "arviz":
+                raise ImportError
+            return __import__(name, *args)
+
+        mock_import.side_effect = import_side_effect
+
+        with self.assertRaises(ResultError) as excinfo:
+            self.result.to_arviz()
+
+        self.assertEqual(
+            str(excinfo.exception),
+            "ArviZ is not installed, so cannot convert to InferenceData."
+        )
+
+    def test_result_caching(self):
+
+        class SimpleLikelihood(bilby.Likelihood):
+            def __init__(self):
+                super().__init__(parameters={"x": None})
+
+            def log_likelihood(self):
+                return -self.parameters["x"]**2
+
+        likelihood = SimpleLikelihood()
+        priors = dict(x=bilby.core.prior.Uniform(-5, 5, "x"))
+
+        # Trivial subclass of Result
+
+        class NotAResult(bilby.core.result.Result):
+            pass
+
+        result = bilby.run_sampler(
+            likelihood,
+            priors,
+            sampler='bilby_mcmc',
+            outdir=self.outdir,
+            nsamples=10,
+            L1steps=1,
+            proposal_cycle="default_noGMnoKD",
+            printdt=1,
+            check_point_plot=False,
+            result_class=NotAResult
+        )
+        # result should be specified result_class
+        assert isinstance(result, NotAResult)
+
+        cached_result = bilby.run_sampler(
+            likelihood,
+            priors,
+            sampler='bilby_mcmc',
+            outdir=self.outdir,
+            nsamples=10,
+            L1steps=1,
+            proposal_cycle="default_noGMnoKD",
+            printdt=1,
+            check_point_plot=False,
+            result_class=NotAResult
+        )
+
+        # so should a result loaded from cache
+        assert isinstance(cached_result, NotAResult)
 
 
 class TestResultListError(unittest.TestCase):
@@ -714,6 +806,116 @@ class TestPPPlots(unittest.TestCase):
             _ = bilby.core.result.make_pp_plot(
                 self.results, save=False, confidence_interval_alpha=[0.1]
             )
+
+
+class SimpleGaussianLikelihood(bilby.core.likelihood.Likelihood):
+    def __init__(self, mean=0, sigma=1):
+        """
+        A very simple Gaussian likelihood for testing
+        """
+        from scipy.stats import norm
+        super().__init__(parameters=dict())
+        self.mean = mean
+        self.sigma = sigma
+        self.dist = norm(loc=mean, scale=sigma)
+
+    def log_likelihood(self):
+        return self.dist.logpdf(self.parameters["mu"])
+
+
+class TestReweight(unittest.TestCase):
+
+    def setUp(self):
+        self.priors = bilby.core.prior.PriorDict(dict(
+            mu=bilby.core.prior.TruncatedNormal(0, 1, minimum=-5, maximum=5),
+        ))
+        self.result = bilby.core.result.Result(
+            search_parameter_keys=list(self.priors.keys()),
+            priors=self.priors,
+            posterior=pd.DataFrame(self.priors.sample(2000)),
+            log_evidence=-np.log(10),
+        )
+
+    def _run_reweighting(self, sigma):
+        likelihood_1 = SimpleGaussianLikelihood()
+        likelihood_2 = SimpleGaussianLikelihood(sigma=sigma)
+        original_ln_likelihoods = list()
+        for ii in range(len(self.result.posterior)):
+            likelihood_1.parameters = self.result.posterior.iloc[ii]
+            original_ln_likelihoods.append(likelihood_1.log_likelihood())
+        self.result.posterior["log_prior"] = self.priors.ln_prob(self.result.posterior)
+        self.result.posterior["log_likelihood"] = original_ln_likelihoods
+        self.original_ln_likelihoods = original_ln_likelihoods
+        return bilby.core.result.reweight(
+            self.result, likelihood_1, likelihood_2, verbose_output=True
+        )
+
+    def test_reweight_same_likelihood_weights_1(self):
+        """
+        When the likelihoods are the same, the weights should be 1.
+        """
+        _, weights, _, _, _, _ = self._run_reweighting(sigma=1)
+        self.assertLess(min(abs(weights - 1)), 1e-10)
+
+    @pytest.mark.flaky(reruns=3)
+    def test_reweight_different_likelihood_weights_correct(self):
+        """
+        Test the known case where the target likelihood is a Gaussian with
+        sigma=0.5. The weights can be calculated analytically and the evidence
+        should be close to the original evidence within statistical error.
+        """
+        from scipy.stats import norm
+        new, weights, _, _, _, _ = self._run_reweighting(sigma=0.5)
+        expected_weights = (
+            norm(0, 0.5).pdf(self.result.posterior["mu"])
+            / norm(0, 1).pdf(self.result.posterior["mu"])
+        )
+        self.assertLess(min(abs(weights - expected_weights)), 1e-10)
+        self.assertLess(abs(new.log_evidence - self.result.log_evidence), 0.05)
+        self.assertNotEqual(new.log_evidence, self.result.log_evidence)
+
+    def test_save_to_file_filename_with_extension_and_extension_none(self):
+        # Should use the extension from filename
+        filename = os.path.join(self.result.outdir, "custom_name.hdf5")
+        self.result.save_to_file(filename=filename, extension=None)
+        self.assertTrue(os.path.isfile(filename))
+        os.remove(filename)
+
+    def test_save_to_file_filename_with_extension_and_extension_true(self):
+        """This is a strange default, that we should remove, but is here for consistency"""
+        filename = os.path.join(self.result.outdir, "custom_name.hdf5")
+        expected = os.path.join(self.result.outdir, "custom_name.json")
+        self.result.save_to_file(filename=filename, extension=True)
+        self.assertTrue(os.path.isfile(expected))
+        self.assertFalse(os.path.isfile(filename))
+        os.remove(expected)
+
+    def test_save_to_file_filename_with_extension_and_extension_set(self):
+        # Should override the extension in filename with the one provided in extension
+        filename = os.path.join(self.result.outdir, "custom_name.hdf5")
+        expected = os.path.join(self.result.outdir, "custom_name.json")
+        self.result.save_to_file(filename=filename, extension="json")
+        self.assertTrue(os.path.isfile(expected))
+        self.assertFalse(os.path.isfile(filename))
+        os.remove(expected)
+
+    def test_save_to_file_filename_without_extension_and_extension_none(self):
+        # Should use the default extension (json)
+        filename = os.path.join(self.result.outdir, "custom_name_noext")
+        expected = filename + ".json"
+        self.result.save_to_file(filename=filename, extension=None)
+        self.assertTrue(os.path.isfile(expected))
+        self.assertFalse(os.path.isfile(filename))
+        os.remove(expected)
+
+    def test_save_to_file_defaults_to_pickle_with_incorrect_extension(self):
+        """This is a weird fallback..."""
+        filename = os.path.join(self.result.outdir, "custom_name_noext")
+        expected = filename + ".pkl"
+        self.result.save_to_file(filename=filename, extension="bar")
+        self.assertTrue(os.path.isfile(expected))
+        self.assertFalse(os.path.isfile(filename))
+        os.remove(expected)
 
 
 if __name__ == "__main__":

@@ -25,12 +25,12 @@ class InterferometerList(list):
         """
 
         super(InterferometerList, self).__init__()
-        if type(interferometers) == str:
+        if isinstance(interferometers, str):
             raise TypeError("Input must not be a string")
         for ifo in interferometers:
-            if type(ifo) == str:
+            if isinstance(ifo, str):
                 ifo = get_empty_interferometer(ifo)
-            if type(ifo) not in [Interferometer, TriangularInterferometer]:
+            if not isinstance(ifo, (Interferometer, TriangularInterferometer)):
                 raise TypeError(
                     "Input list of interferometers are not all Interferometer objects"
                 )
@@ -102,11 +102,10 @@ class InterferometerList(list):
     def set_strain_data_from_zero_noise(
         self, sampling_frequency, duration, start_time=0
     ):
-        """Set the `Interferometer.strain_data` from the power spectral densities of the detectors
+        """Set the `Interferometer.strain_data` to zero in each detector
 
-        This uses the `interferometer.power_spectral_density` object to set
-        the `strain_data` to zero noise. See
-        `bilby.gw.detector.InterferometerStrainData` for further information.
+        See :py:meth:`bilby.gw.detector.InterferometerStrainData.set_from_zero_noise`
+        for further  information.
 
         Parameters
         ==========
@@ -204,6 +203,43 @@ class InterferometerList(list):
         for interferometer in self:
             interferometer.plot_data(signal=signal, outdir=outdir, label=label)
 
+    def plot_time_domain_data(
+        self, outdir=".", label=None, bandpass_frequencies=(50, 250),
+        notches=None, start_end=None, t0=None
+    ):
+        """Plots the strain data in the time domain for each of the
+        interfeormeters
+
+        Parameters
+        ==========
+        outdir: str
+            The output directory in which the plots should be saved.
+        label: str
+            The string labelling the data.
+        bandpass_frequencies: tuple, optional
+            A tuple of the (low, high) frequencies to use when bandpassing
+            data, if None no bandpass is applied.
+        notches: list, optional
+            A list of frequencies specifying any lines to notch.
+        start_end: tuple, optional
+            A tuple of the (start, end) range of GPS times to plot.
+        t0: float, optional
+            If given, the reference time to subtract from the time series
+            plotting.
+        """
+        if utils.command_line_args.bilby_test_mode:
+            return
+
+        for interferometer in self:
+            interferometer.plot_time_domain_data(
+                outdir=outdir,
+                label=label,
+                bandpass_frequencies=bandpass_frequencies,
+                notches=notches,
+                start_end=start_end,
+                t0=t0
+            )
+
     @property
     def number_of_interferometers(self):
         return len(self)
@@ -273,7 +309,7 @@ class InterferometerList(list):
     """
 
     def to_pickle(self, outdir="outdir", label="ifo_list"):
-        utils.check_directory_exists_and_if_not_mkdir("outdir")
+        utils.check_directory_exists_and_if_not_mkdir(outdir)
         label = label + "_" + "".join(ifo.name for ifo in self)
         filename = self._filename_from_outdir_label_extension(
             outdir, label, extension="pkl"

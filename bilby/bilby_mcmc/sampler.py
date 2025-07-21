@@ -16,7 +16,12 @@ from ..core.sampler.base_sampler import (
     _sampling_convenience_dump,
     signal_wrapper,
 )
-from ..core.utils import check_directory_exists_and_if_not_mkdir, logger, safe_file_dump
+from ..core.utils import (
+    check_directory_exists_and_if_not_mkdir,
+    logger,
+    random,
+    safe_file_dump,
+)
 from . import proposals
 from .chain import Chain, Sample
 from .utils import LOGLKEY, LOGPKEY, ConvergenceInputs, ParallelTemperingInputs
@@ -122,6 +127,9 @@ class Bilby_MCMC(MCMCSampler):
     initial_sample_dict: dict
         A dictionary of the initial sample value. If incomplete, will overwrite
         the initial_sample drawn using initial_sample_method.
+    normalize_prior: bool
+        When False, disables calculation of constraint normalization factor
+        during prior probability computation. Default value is True.
     verbose: bool
         Whether to print diagnostic output during the run.
 
@@ -170,6 +178,7 @@ class Bilby_MCMC(MCMCSampler):
         resume=True,
         exit_code=130,
         verbose=True,
+        normalize_prior=True,
         **kwargs,
     ):
 
@@ -189,6 +198,7 @@ class Bilby_MCMC(MCMCSampler):
         self.kwargs["target_nsamples"] = self.kwargs["nsamples"]
         self.L1steps = self.kwargs["L1steps"]
         self.L2steps = self.kwargs["L2steps"]
+        self.normalize_prior = normalize_prior
         self.pt_inputs = ParallelTemperingInputs(
             **{key: self.kwargs[key] for key in ParallelTemperingInputs._fields}
         )
@@ -202,6 +212,7 @@ class Bilby_MCMC(MCMCSampler):
         self.initial_sample_dict = self.kwargs["initial_sample_dict"]
 
         self.printdt = self.kwargs["printdt"]
+        self.check_point_delta_t = self.kwargs["check_point_delta_t"]
         check_directory_exists_and_if_not_mkdir(self.outdir)
         self.resume = resume
         self.resume_file = "{}/{}_resume.pickle".format(self.outdir, self.label)
@@ -303,6 +314,7 @@ class Bilby_MCMC(MCMCSampler):
             evidence_method=self.evidence_method,
             initial_sample_method=self.initial_sample_method,
             initial_sample_dict=self.initial_sample_dict,
+            normalize_prior=self.normalize_prior,
         )
 
     def get_setup_string(self):
@@ -318,8 +330,8 @@ class Bilby_MCMC(MCMCSampler):
         self._steps_since_last_print = 0
         self._time_since_last_print = 0
         logger.info(f"Drawing {self.target_nsamples} samples")
-        logger.info(f"Checkpoint every {self.kwargs['check_point_delta_t']}s")
-        logger.info(f"Print update every {self.printdt}s")
+        logger.info(f"Checkpoint every check_point_delta_t={self.check_point_delta_t}s")
+        logger.info(f"Print update every printdt={self.printdt}s")
 
         while True:
             t0 = datetime.datetime.now()
@@ -376,13 +388,15 @@ class Bilby_MCMC(MCMCSampler):
             If true, resume file was successfully loaded, otherwise false
 
         """
-        if os.path.isfile(self.resume_file) is False:
+        if os.path.isfile(self.resume_file) is False or not os.path.getsize(
+            self.resume_file
+        ):
             return False
         import dill
 
         with open(self.resume_file, "rb") as file:
             ptsampler = dill.load(file)
-            if type(ptsampler) != BilbyPTMCMCSampler:
+            if not isinstance(ptsampler, BilbyPTMCMCSampler):
                 logger.debug("Malformed resume file, ignoring")
                 return False
             self.ptsampler = ptsampler
@@ -516,7 +530,7 @@ class Bilby_MCMC(MCMCSampler):
                 else:
                     ratio = "-"
                 logger.info(
-                    f"Temp:{ii}<->{ii+1}|"
+                    f"Temp:{ii}<->{ii + 1}|"
                     f"beta={beta:0.4g}|"
                     f"hot-samp={sampler.nsamples}|"
                     f"swap={ratio}|"
@@ -541,6 +555,29 @@ class Bilby_MCMC(MCMCSampler):
                         all_samples=ptsampler.samples,
                     )
 
+    @classmethod
+    def get_expected_outputs(cls, outdir=None, label=None):
+        """Get lists of the expected outputs directories and files.
+
+        These are used by :code:`bilby_pipe` when transferring files via HTCondor.
+
+        Parameters
+        ----------
+        outdir : str
+            The output directory.
+        label : str
+            The label for the run.
+
+        Returns
+        -------
+        list
+            List of file names.
+        list
+            List of directory names. Will always be empty for bilby_mcmc.
+        """
+        filenames = [os.path.join(outdir, f"{label}_resume.pickle")]
+        return filenames, []
+
 
 class BilbyPTMCMCSampler(object):
     def __init__(
@@ -554,11 +591,13 @@ class BilbyPTMCMCSampler(object):
         evidence_method,
         initial_sample_method,
         initial_sample_dict,
+        normalize_prior=True,
     ):
         self.set_pt_inputs(pt_inputs)
         self.use_ratio = use_ratio
         self.initial_sample_method = initial_sample_method
         self.initial_sample_dict = initial_sample_dict
+        self.normalize_prior = normalize_prior
         self.setup_sampler_dictionary(convergence_inputs, proposal_cycle)
         self.set_convergence_inputs(convergence_inputs)
         self.pt_rejection_sample = pt_rejection_sample
@@ -629,6 +668,7 @@ class BilbyPTMCMCSampler(object):
                     use_ratio=self.use_ratio,
                     initial_sample_method=self.initial_sample_method,
                     initial_sample_dict=self.initial_sample_dict,
+                    normalize_prior=self.normalize_prior,
                 )
                 for Eindex in range(n)
             ]
@@ -736,13 +776,19 @@ class BilbyPTMCMCSampler(object):
 
     @property
     def samples(self):
+        cached_samples = getattr(self, "_cached_samples", (False,))
+        if cached_samples[0] == self.position:
+            return cached_samples[1]
+
         sample_list = []
         for sampler in self.zerotemp_sampler_list:
             sample_list.append(sampler.samples)
         if self.pt_rejection_sample:
             for sampler in self.tempered_sampler_list:
                 sample_list.append(sampler.samples)
-        return pd.concat(sample_list)
+        samples = pd.concat(sample_list, ignore_index=True)
+        self._cached_samples = (self.position, samples)
+        return samples
 
     @property
     def position(self):
@@ -785,7 +831,7 @@ class BilbyPTMCMCSampler(object):
 
     @staticmethod
     def _get_sample_to_swap(sampler):
-        if sampler.chain.converged is False:
+        if not (sampler.chain.converged and sampler.stop_after_convergence):
             v = sampler.chain[-1]
         else:
             v = sampler.chain.random_sample
@@ -811,7 +857,7 @@ class BilbyPTMCMCSampler(object):
                 with np.errstate(over="ignore"):
                     alpha_swap = np.exp(dbeta * (logli - loglj))
 
-                if np.random.uniform(0, 1) <= alpha_swap:
+                if random.rng.uniform(0, 1) <= alpha_swap:
                     sampleri.chain[-1] = vj
                     samplerj.chain[-1] = vi
                     self.sampler_dictionary[Tindex][Eindex] = sampleri
@@ -845,7 +891,7 @@ class BilbyPTMCMCSampler(object):
                         - curr[LOGPKEY]
                     )
 
-                    if np.random.uniform(0, 1) <= alpha:
+                    if random.rng.uniform(0, 1) <= alpha:
                         sampler.accept_proposal(prop, proposal)
                     else:
                         sampler.reject_proposal(curr, proposal)
@@ -899,7 +945,7 @@ class BilbyPTMCMCSampler(object):
             ln_z, ln_z_err = self.compute_evidence_per_ensemble(method, kwargs)
             self.ln_z_dict[key] = ln_z
             self.ln_z_err_dict[key] = ln_z_err
-            logger.info(
+            logger.debug(
                 f"Log-evidence of {ln_z:0.2f}+/-{ln_z_err:0.2f} calculated using {key} method"
             )
 
@@ -1014,7 +1060,7 @@ class BilbyPTMCMCSampler(object):
         ln_z_realisations = []
         try:
             for _ in range(repeats):
-                idxs = [np.random.randint(i, i + ll) for i in range(steps - ll)]
+                idxs = [random.rng.integers(i, i + ll) for i in range(steps - ll)]
                 ln_z_realisations.append(
                     self._calculate_stepping_stone(betas, ln_likes[idxs, :])[0]
                 )
@@ -1117,12 +1163,13 @@ class BilbyMCMCSampler(object):
         use_ratio=False,
         initial_sample_method="prior",
         initial_sample_dict=None,
+        normalize_prior=True,
     ):
         self.beta = beta
         self.Tindex = Tindex
         self.Eindex = Eindex
         self.use_ratio = use_ratio
-
+        self.normalize_prior = normalize_prior
         self.parameters = _sampling_convenience_dump.priors.non_fixed_keys
         self.ndim = len(self.parameters)
 
@@ -1155,7 +1202,9 @@ class BilbyMCMCSampler(object):
                 }
             )
 
-        logger.info(f"Using initial sample {initial_sample}")
+        if self.beta == 1:
+            logger.info(f"Using initial sample {initial_sample}")
+
         initial_sample = Sample(initial_sample)
         initial_sample[LOGLKEY] = self.log_likelihood(initial_sample)
         initial_sample[LOGPKEY] = self.log_prior(initial_sample)
@@ -1207,7 +1256,10 @@ class BilbyMCMCSampler(object):
         return logl
 
     def log_prior(self, sample):
-        return _sampling_convenience_dump.priors.ln_prob(sample.parameter_only_dict)
+        return _sampling_convenience_dump.priors.ln_prob(
+            sample.parameter_only_dict,
+            normalized=self.normalize_prior,
+        )
 
     def accept_proposal(self, prop, proposal):
         self.chain.append(prop)
@@ -1230,7 +1282,11 @@ class BilbyMCMCSampler(object):
         while internal_steps < self.chain.L1steps:
             internal_steps += 1
             proposal = self.proposal_cycle.get_proposal()
-            prop, log_factor = proposal(self.chain)
+            prop, log_factor = proposal(
+                self.chain,
+                likelihood=_sampling_convenience_dump.likelihood,
+                priors=_sampling_convenience_dump.priors,
+            )
             logp = self.log_prior(prop)
 
             if np.isinf(logp) or np.isnan(logp):
@@ -1255,7 +1311,7 @@ class BilbyMCMCSampler(object):
                     - curr[LOGPKEY]
                 )
 
-            if np.random.uniform(0, 1) <= alpha:
+            if random.rng.uniform(0, 1) <= alpha:
                 internal_accepted += 1
                 proposal.accepted += 1
                 curr = prop

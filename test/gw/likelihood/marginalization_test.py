@@ -14,7 +14,7 @@ from scipy.special import logsumexp
 
 class TestMarginalizedLikelihood(unittest.TestCase):
     def setUp(self):
-        np.random.seed(500)
+        bilby.core.utils.random.seed(500)
         self.duration = 4
         self.sampling_frequency = 2048
         self.parameters = dict(
@@ -157,6 +157,7 @@ class TestMarginalizedLikelihood(unittest.TestCase):
             bilby.run_sampler(like, new_prior)
 
 
+@pytest.mark.requires_roqs
 class TestMarginalizations(unittest.TestCase):
     """
     Test all marginalised likelihoods matches brute force version.
@@ -165,7 +166,7 @@ class TestMarginalizations(unittest.TestCase):
     The `time_jitter` parameter makes this a weaker dependence during sampling.
     """
     _parameters = product(
-        ["regular", "roq", "relbin"],
+        ["regular", "roq", "relbin", "multiband"],
         ["luminosity_distance", "geocent_time", "phase"],
         [True, False],
         [True, False],
@@ -177,7 +178,7 @@ class TestMarginalizations(unittest.TestCase):
     path_to_roq_weights = "weights.npz"
 
     def setUp(self):
-        np.random.seed(500)
+        bilby.core.utils.random.seed(200)
         self.duration = 4
         self.sampling_frequency = 2048
         self.parameters = dict(
@@ -215,7 +216,7 @@ class TestMarginalizations(unittest.TestCase):
             waveform_arguments=dict(
                 reference_frequency=20.0,
                 minimum_frequency=20.0,
-                approximant="IMRPhenomPv2",
+                waveform_approximant="IMRPhenomPv2",
             )
         )
         self.interferometers.inject_signal(
@@ -248,8 +249,7 @@ class TestMarginalizations(unittest.TestCase):
             start_time=1126259640,
             waveform_arguments=dict(
                 reference_frequency=20.0,
-                minimum_frequency=20.0,
-                approximant="IMRPhenomPv2",
+                waveform_approximant="IMRPhenomPv2",
                 frequency_nodes_linear=np.load(f"{roq_dir}/fnodes_linear.npy"),
                 frequency_nodes_quadratic=np.load(f"{roq_dir}/fnodes_quadratic.npy"),
             )
@@ -265,7 +265,18 @@ class TestMarginalizations(unittest.TestCase):
             waveform_arguments=dict(
                 reference_frequency=20.0,
                 minimum_frequency=20.0,
-                approximant="IMRPhenomPv2",
+                waveform_approximant="IMRPhenomPv2",
+            )
+        )
+
+        self.multiband_waveform_generator = bilby.gw.WaveformGenerator(
+            duration=self.duration,
+            sampling_frequency=self.sampling_frequency,
+            frequency_domain_source_model=bilby.gw.source.binary_black_hole_frequency_sequence,
+            start_time=1126259640,
+            waveform_arguments=dict(
+                reference_frequency=20.0,
+                waveform_approximant="IMRPhenomPv2",
             )
         )
 
@@ -314,6 +325,12 @@ class TestMarginalizations(unittest.TestCase):
         elif kind == "relbin":
             kwargs["fiducial_parameters"] = deepcopy(self.parameters)
             kwargs["waveform_generator"] = self.relbin_waveform_generator
+        elif kind == "multiband":
+            kwargs["waveform_generator"] = self.multiband_waveform_generator
+            kwargs["reference_chirp_mass"] = (
+                (self.parameters["mass_1"] * self.parameters["mass_2"])**0.6 /
+                (self.parameters["mass_1"] + self.parameters["mass_2"])**0.2
+            )
         return kwargs
 
     def get_likelihood(
@@ -333,8 +350,10 @@ class TestMarginalizations(unittest.TestCase):
             cls_ = bilby.gw.likelihood.ROQGravitationalWaveTransient
         elif kind == "relbin":
             cls_ = bilby.gw.likelihood.RelativeBinningGravitationalWaveTransient
-            kwargs["epsilon"] = 0.3
+            kwargs["epsilon"] = 0.1
             self.parameters["fiducial"] = 0
+        elif kind == "multiband":
+            cls_ = bilby.gw.likelihood.MBGravitationalWaveTransient
         else:
             raise ValueError(f"kind {kind} not understood")
         like = cls_(**kwargs)
@@ -366,7 +385,15 @@ class TestMarginalizations(unittest.TestCase):
             marg_like, marginalized.log_likelihood_ratio(), delta=0.5
         )
 
-    @parameterized.expand(_parameters)
+    @parameterized.expand(
+        _parameters,
+        name_func=lambda func, num, param: (
+            f"{func.__name__}_{num}__{param.args[0]}_{param.args[1]}_" + "_".join([
+                ["D", "T", "P"][ii] for ii, val
+                in enumerate(param.args[-3:]) if val
+            ])
+        )
+    )
     def test_marginalisation(self, kind, key, distance, time, phase):
         if all([distance, time, phase]):
             pytest.skip()
@@ -407,7 +434,7 @@ class TestMarginalizations(unittest.TestCase):
         )
 
     @parameterized.expand(
-        itertools.product(["regular", "roq", "relbin"], *itertools.repeat([True, False], 3)),
+        itertools.product(["regular", "roq", "relbin", "multiband"], *itertools.repeat([True, False], 3)),
         name_func=lambda func, num, param: (
             f"{func.__name__}_{num}__{param.args[0]}_" + "_".join([
                 ["D", "P", "T"][ii] for ii, val

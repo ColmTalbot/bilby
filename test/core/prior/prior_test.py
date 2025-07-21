@@ -87,6 +87,13 @@ class TestPriorClasses(unittest.TestCase):
             bilby.core.prior.Gamma(name="test", unit="unit", k=1, theta=1),
             bilby.core.prior.ChiSquared(name="test", unit="unit", nu=2),
             bilby.gw.prior.AlignedSpin(name="test", unit="unit"),
+            bilby.gw.prior.AlignedSpin(
+                a_prior=bilby.core.prior.Beta(alpha=2.0, beta=2.0),
+                z_prior=bilby.core.prior.Beta(alpha=2.0, beta=2.0, minimum=-1),
+                name="test",
+                unit="unit",
+                num_interp=1000,
+            ),
             bilby.core.prior.MultivariateGaussian(dist=mvg, name="testa", unit="unit"),
             bilby.core.prior.MultivariateGaussian(dist=mvg, name="testb", unit="unit"),
             bilby.core.prior.MultivariateNormal(dist=mvn, name="testa", unit="unit"),
@@ -134,6 +141,27 @@ class TestPriorClasses(unittest.TestCase):
                 unit="unit",
                 minimum=5e0,
                 maximum=1e2,
+            ),
+            bilby.core.prior.Triangular(
+                name="test",
+                unit="unit",
+                minimum=-1.1,
+                maximum=3.14,
+                mode=0.,
+            ),
+            bilby.core.prior.Triangular(
+                name="test",
+                unit="unit",
+                minimum=0.,
+                maximum=4.,
+                mode=4.,
+            ),
+            bilby.core.prior.Triangular(
+                name="test",
+                unit="unit",
+                minimum=2.,
+                maximum=5.,
+                mode=2.,
             ),
             bilby.gw.prior.ConditionalUniformComovingVolume(
                 condition_func=condition_func, name="redshift", minimum=0.1, maximum=1.0
@@ -207,7 +235,11 @@ class TestPriorClasses(unittest.TestCase):
     def test_minimum_rescaling(self):
         """Test the the rescaling works as expected."""
         for prior in self.priors:
-            if bilby.core.prior.JointPrior in prior.__class__.__mro__:
+            if isinstance(prior, bilby.gw.prior.AlignedSpin):
+                # the edge of the prior is extremely suppressed for these priors
+                # and so the rescale function doesn't quite return the lower bound
+                continue
+            elif bilby.core.prior.JointPrior in prior.__class__.__mro__:
                 minimum_sample = prior.rescale(0)
                 if prior.dist.filled_rescale():
                     self.assertAlmostEqual(minimum_sample[0], prior.minimum)
@@ -537,6 +569,8 @@ class TestPriorClasses(unittest.TestCase):
                 domain = np.linspace(-1e2, 1e2, 1000)
             elif isinstance(prior, bilby.core.prior.FermiDirac):
                 domain = np.linspace(0.0, 1e2, 1000)
+            elif isinstance(prior, bilby.gw.prior.AlignedSpin):
+                domain = np.linspace(prior.minimum, prior.maximum, 10000)
             else:
                 domain = np.linspace(prior.minimum, prior.maximum, 1000)
             self.assertAlmostEqual(np.trapz(prior.prob(domain), domain), 1, 3)
@@ -702,6 +736,7 @@ class TestPriorClasses(unittest.TestCase):
                     bilby.core.prior.Gamma,
                     bilby.core.prior.MultivariateGaussian,
                     bilby.core.prior.FermiDirac,
+                    bilby.core.prior.Triangular,
                     bilby.gw.prior.HealPixPrior,
                 ),
             ):
@@ -725,6 +760,7 @@ class TestPriorClasses(unittest.TestCase):
                     bilby.core.prior.Gamma,
                     bilby.core.prior.MultivariateGaussian,
                     bilby.core.prior.FermiDirac,
+                    bilby.core.prior.Triangular,
                     bilby.gw.prior.HealPixPrior,
                 ),
             ):

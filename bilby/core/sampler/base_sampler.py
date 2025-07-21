@@ -18,6 +18,7 @@ from ..utils import (
     command_line_args,
     logger,
 )
+from ..utils.random import seed as set_seed
 
 
 @attr.s
@@ -56,7 +57,6 @@ def _initialize_global_variables(
     Store a global copy of the likelihood, priors, and search keys for
     multiprocessing.
     """
-    global _sampling_convenience_dump
     _sampling_convenience_dump.likelihood = likelihood
     _sampling_convenience_dump.priors = priors
     _sampling_convenience_dump.search_parameter_keys = search_parameter_keys
@@ -172,6 +172,13 @@ class Sampler(object):
         Whether the implemented sampler exits hard (:code:`os._exit` rather
         than :code:`sys.exit`). The latter can be escaped as :code:`SystemExit`.
         The former cannot.
+    sampler_name : str
+        Name of the sampler. This is used when creating the output directory for
+        the sampler.
+    abbreviation : str
+        Abbreviated name of the sampler. Does not have to be specified in child
+        classes. If set to a value other than :code:`None`, this will be used
+        instead of :code:`sampler_name` when creating the output directory.
 
     Raises
     ======
@@ -186,6 +193,8 @@ class Sampler(object):
 
     """
 
+    sampler_name = "sampler"
+    abbreviation = None
     default_kwargs = dict()
     check_point_equiv_kwargs = ["check_point_deltaT", "check_point_delta_t"]
     npool_equiv_kwargs = [
@@ -203,6 +212,7 @@ class Sampler(object):
     If a specific sampler does not have a sampling seed option, then it should be
     left as None.
     """
+    check_point_equiv_kwargs = ["check_point_deltaT", "check_point_delta_t"]
 
     def __init__(
         self,
@@ -247,14 +257,15 @@ class Sampler(object):
 
         self.exit_code = exit_code
 
+        self._log_likelihood_eval_time = np.nan
         if not soft_init:
             self._verify_parameters()
-            self._time_likelihood()
+            self._log_likelihood_eval_time = self._time_likelihood()
             self._verify_use_ratio()
 
         self.kwargs = kwargs
 
-        self._check_cached_result()
+        self._check_cached_result(result_class)
 
         self._log_summary_for_sampler()
 
@@ -305,6 +316,7 @@ class Sampler(object):
             for equiv in self.sampling_seed_equiv_kwargs:
                 if equiv in kwargs:
                     kwargs[self.sampling_seed_key] = kwargs.pop(equiv)
+                    set_seed(kwargs[self.sampling_seed_key])
         return kwargs
 
     @property
@@ -431,6 +443,10 @@ class Sampler(object):
         n_evaluations: int
             The number of evaluations to estimate the evaluation time from
 
+        Returns
+        =======
+        log_likelihood_eval_time: float
+            The time (in s) it took for one likelihood evaluation
         """
 
         t1 = datetime.datetime.now()
@@ -440,15 +456,16 @@ class Sampler(object):
             )[:, 0]
             self.log_likelihood(theta)
         total_time = (datetime.datetime.now() - t1).total_seconds()
-        self._log_likelihood_eval_time = total_time / n_evaluations
+        log_likelihood_eval_time = total_time / n_evaluations
 
-        if self._log_likelihood_eval_time == 0:
-            self._log_likelihood_eval_time = np.nan
+        if log_likelihood_eval_time == 0:
+            log_likelihood_eval_time = np.nan
             logger.info("Unable to measure single likelihood time")
         else:
             logger.info(
-                f"Single likelihood evaluation took {self._log_likelihood_eval_time:.3e} s"
+                f"Single likelihood evaluation took {log_likelihood_eval_time:.3e} s"
             )
+        return log_likelihood_eval_time
 
     def _verify_use_ratio(self):
         """
@@ -568,12 +585,14 @@ class Sampler(object):
             likelihood evaluations.
 
         """
+        from ..utils import random
+
         logger.info("Generating initial points from the prior")
         unit_cube = []
         parameters = []
         likelihood = []
         while len(unit_cube) < npoints:
-            unit = np.random.rand(self.ndim)
+            unit = random.rng.uniform(0, 1, self.ndim)
             theta = self.prior_transform(unit)
             if self.check_draw(theta, warning=False):
                 unit_cube.append(unit)
@@ -632,7 +651,7 @@ class Sampler(object):
         """
         raise ValueError("Method not yet implemented")
 
-    def _check_cached_result(self):
+    def _check_cached_result(self, result_class=None):
         """Check if the cached data file exists and can be used"""
 
         if command_line_args.clean:
@@ -641,7 +660,9 @@ class Sampler(object):
             return
 
         try:
-            self.cached_result = read_in_result(outdir=self.outdir, label=self.label)
+            self.cached_result = read_in_result(
+                outdir=self.outdir, label=self.label, result_class=result_class
+            )
         except IOError:
             self.cached_result = None
 
@@ -676,11 +697,11 @@ class Sampler(object):
         if self.cached_result is None:
             kwargs_print = self.kwargs.copy()
             for k in kwargs_print:
-                if type(kwargs_print[k]) in (list, np.ndarray):
+                if isinstance(kwargs_print[k], (list, np.ndarray)):
                     array_repr = np.array(kwargs_print[k])
                     if array_repr.size > 10:
                         kwargs_print[k] = f"array_like, shape={array_repr.shape}"
-                elif type(kwargs_print[k]) == DataFrame:
+                elif isinstance(kwargs_print[k], DataFrame):
                     kwargs_print[k] = f"DataFrame, shape={kwargs_print[k].shape}"
             logger.info(
                 f"Using sampler {self.__class__.__name__} with kwargs {kwargs_print}"
@@ -767,8 +788,37 @@ class Sampler(object):
     def write_current_state(self):
         raise NotImplementedError()
 
+    @classmethod
+    def get_expected_outputs(cls, outdir=None, label=None):
+        """Get lists of the expected outputs directories and files.
+
+        These are used by :code:`bilby_pipe` when transferring files via HTCondor.
+        Both can be empty. Defaults to a single directory:
+        :code:`"{outdir}/{name}_{label}/"`, where :code:`name`
+        is :code:`abbreviation` if it is defined for the sampler class, otherwise
+        it defaults to :code:`sampler_name`.
+
+        Parameters
+        ----------
+        outdir : str
+            The output directory.
+        label : str
+            The label for the run.
+
+        Returns
+        -------
+        list
+            List of file names.
+        list
+            List of directory names.
+        """
+        name = cls.abbreviation or cls.sampler_name
+        dirname = os.path.join(outdir, f"{name}_{label}", "")
+        return [], [dirname]
+
 
 class NestedSampler(Sampler):
+    sampler_name = "nested_sampler"
     npoints_equiv_kwargs = [
         "nlive",
         "nlives",
@@ -842,6 +892,7 @@ class NestedSampler(Sampler):
 
 
 class MCMCSampler(Sampler):
+    sampler_name = "mcmc_sampler"
     nwalkers_equiv_kwargs = ["nwalker", "nwalkers", "draws", "Niter"]
     nburn_equiv_kwargs = ["burn", "nburn"]
 
@@ -896,7 +947,19 @@ class _TemporaryFileSamplerMixin:
 
     def __init__(self, temporary_directory, **kwargs):
         super(_TemporaryFileSamplerMixin, self).__init__(**kwargs)
-        self.use_temporary_directory = temporary_directory
+        try:
+            from mpi4py import MPI
+
+            using_mpi = MPI.COMM_WORLD.Get_size() > 1
+        except ImportError:
+            using_mpi = False
+
+        if using_mpi and temporary_directory:
+            logger.info(
+                "Temporary directory incompatible with MPI, "
+                "will run in original directory"
+            )
+        self.use_temporary_directory = temporary_directory and not using_mpi
         self._outputfiles_basename = None
         self._temporary_outputfiles_basename = None
 

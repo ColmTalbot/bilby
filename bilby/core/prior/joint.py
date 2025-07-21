@@ -6,6 +6,7 @@ from scipy.special import erfinv
 
 from .base import Prior, PriorException
 from ..utils import logger, infer_args_from_method, get_dict_with_properties
+from ..utils import random
 
 
 class BaseJointPriorDist(object):
@@ -138,6 +139,38 @@ class BaseJointPriorDist(object):
             ]
         )
         return "{}({})".format(dist_name, args)
+
+    @classmethod
+    def from_repr(cls, string):
+        """Generate the distribution from its __repr__"""
+        return cls._from_repr(string)
+
+    @classmethod
+    def _from_repr(cls, string):
+        subclass_args = infer_args_from_method(cls.__init__)
+
+        string = string.replace(" ", "")
+        kwargs = cls._split_repr(string)
+        for key in kwargs:
+            val = kwargs[key]
+            if key not in subclass_args:
+                raise AttributeError(
+                    "Unknown argument {} for class {}".format(key, cls.__name__)
+                )
+            else:
+                kwargs[key.strip()] = Prior._parse_argument_string(val)
+
+        return cls(**kwargs)
+
+    @classmethod
+    def _split_repr(cls, string):
+        string = string.replace(",", ", ")
+        # see https://stackoverflow.com/a/72146415/1862861
+        args = re.findall(r"(\w+)=(\[.*?]|{.*?}|\S+)(?=\s*,\s*\w+=|\Z)", string)
+        kwargs = dict()
+        for key, arg in args:
+            kwargs[key.strip()] = arg
+        return kwargs
 
     def prob(self, samp):
         """
@@ -309,6 +342,11 @@ class BaseJointPriorDist(object):
         Here is where the subclass where overwrite rescale method
         """
         return samp
+
+    def __eq__(self, other):
+        if self.__class__ != other.__class__:
+            return False
+        return self.get_instantiation_dict() == other.get_instantiation_dict()
 
 
 class MultivariateGaussianDist(BaseJointPriorDist):
@@ -583,7 +621,7 @@ class MultivariateGaussianDist(BaseJointPriorDist):
             if self.nmodes == 1:
                 mode = 0
             else:
-                mode = np.argwhere(self.cumweights - np.random.rand() > 0)[0][0]
+                mode = np.argwhere(self.cumweights - random.rng.uniform(0, 1) > 0)[0][0]
 
         samp = erfinv(2.0 * samp - 1) * 2.0 ** 0.5
 
@@ -604,12 +642,12 @@ class MultivariateGaussianDist(BaseJointPriorDist):
                 mode = 0
             else:
                 if size == 1:
-                    mode = np.argwhere(self.cumweights - np.random.rand() > 0)[0][0]
+                    mode = np.argwhere(self.cumweights - random.rng.uniform(0, 1) > 0)[0][0]
                 else:
                     # pick modes
                     mode = [
                         np.argwhere(self.cumweights - r > 0)[0][0]
-                        for r in np.random.rand(size)
+                        for r in random.rng.uniform(0, 1, size)
                     ]
 
         samps = np.zeros((size, len(self)))
@@ -617,7 +655,7 @@ class MultivariateGaussianDist(BaseJointPriorDist):
             inbound = False
             while not inbound:
                 # sample the multivariate Gaussian keys
-                vals = np.random.uniform(0, 1, len(self))
+                vals = random.rng.uniform(0, 1, len(self))
 
                 if isinstance(mode, list):
                     samp = np.atleast_1d(self.rescale(vals, mode=mode[i]))
@@ -683,38 +721,6 @@ class MultivariateGaussianDist(BaseJointPriorDist):
                     return False
         return True
 
-    @classmethod
-    def from_repr(cls, string):
-        """Generate the distribution from its __repr__"""
-        return cls._from_repr(string)
-
-    @classmethod
-    def _from_repr(cls, string):
-        subclass_args = infer_args_from_method(cls.__init__)
-
-        string = string.replace(" ", "")
-        kwargs = cls._split_repr(string)
-        for key in kwargs:
-            val = kwargs[key]
-            if key not in subclass_args:
-                raise AttributeError(
-                    "Unknown argument {} for class {}".format(key, cls.__name__)
-                )
-            else:
-                kwargs[key.strip()] = Prior._parse_argument_string(val)
-
-        return cls(**kwargs)
-
-    @classmethod
-    def _split_repr(cls, string):
-        string = string.replace(",", ", ")
-        # see https://stackoverflow.com/a/72146415/1862861
-        args = re.findall(r"(\w+)=(\[.*?]|{.*?}|\S+)(?=\s*,\s*\w+=|\Z)", string)
-        kwargs = dict()
-        for key, arg in args:
-            kwargs[key.strip()] = arg
-        return kwargs
-
 
 class MultivariateNormalDist(MultivariateGaussianDist):
     """A synonym for the :class:`~bilby.core.prior.MultivariateGaussianDist` distribution."""
@@ -735,7 +741,7 @@ class JointPrior(Prior):
         unit: str
             See superclass
         """
-        if BaseJointPriorDist not in dist.__class__.__bases__:
+        if not isinstance(dist, BaseJointPriorDist):
             raise TypeError(
                 "Must supply a JointPriorDist object instance to be shared by all joint params"
             )

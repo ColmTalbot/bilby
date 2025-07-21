@@ -75,6 +75,11 @@ def setup_command_line_args():
         action="store_true",
         help="If true, strip back the result to only the posterior",
     )
+    parser.add_argument(
+        "--ignore-inconsistent",
+        action="store_true",
+        help="If true, ignore inconsistency errors in the merge process, but print a warning",
+    )
 
     action_parser = parser.add_mutually_exclusive_group(required=True)
     action_parser.add_argument(
@@ -89,11 +94,7 @@ def setup_command_line_args():
         action="store_true",
         help="Merge the set of runs, output saved using the outdir and label",
     )
-    action_parser.add_argument(
-        "--ignore-inconsistent",
-        action="store_true",
-        help="If true, ignore inconsistency errors in the merge process, but print a warning",
-    )
+
     action_parser.add_argument(
         "-b", "--bayes", action="store_true", help="Print all Bayes factors."
     )
@@ -127,13 +128,6 @@ def setup_command_line_args():
         raise ValueError("You have not passed any results to bilby_result")
 
     return args
-
-
-def read_in_results(filename_list):
-    results_list = []
-    for filename in filename_list:
-        results_list.append(bilby.core.result.read_in_result(filename=filename))
-    return bilby.core.result.ResultList(results_list)
 
 
 def print_bayes_factors(results_list):
@@ -204,7 +198,7 @@ def save(result, args):
 
 def main():
     args = setup_command_line_args()
-    results_list = read_in_results(args.results)
+    results_list = bilby.core.result.read_in_result_list(args.results)
 
     if args.save:
         for result in results_list:

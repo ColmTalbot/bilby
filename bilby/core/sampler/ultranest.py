@@ -38,6 +38,8 @@ class Ultranest(_TemporaryFileSamplerMixin, NestedSampler):
         stepping behaviour is used.
     """
 
+    sampler_name = "ultranest"
+    abbreviation = "ultra"
     default_kwargs = dict(
         resume=True,
         show_status=True,
@@ -262,11 +264,13 @@ class Ultranest(_TemporaryFileSamplerMixin, NestedSampler):
 
     def _generate_result(self, out):
         # extract results
+        from ..utils import random
+
         data = np.array(out["weighted_samples"]["points"])
         weights = np.array(out["weighted_samples"]["weights"])
 
         scaledweights = weights / weights.max()
-        mask = np.random.rand(len(scaledweights)) < scaledweights
+        mask = random.rng.uniform(0, 1, len(scaledweights)) < scaledweights
 
         nested_samples = DataFrame(data, columns=self.search_parameter_keys)
         nested_samples["weights"] = weights

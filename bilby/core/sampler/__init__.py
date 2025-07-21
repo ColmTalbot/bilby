@@ -2,54 +2,130 @@ import datetime
 import inspect
 import sys
 
-import bilby
-from bilby.bilby_mcmc import Bilby_MCMC
-
 from ..prior import DeltaFunction, PriorDict
-from ..utils import command_line_args, env_package_list, loaded_modules_dict, logger
+from ..utils import (
+    command_line_args,
+    env_package_list,
+    get_entry_points,
+    global_meta_data,
+    loaded_modules_dict,
+    logger,
+)
 from . import proposal
 from .base_sampler import Sampler, SamplingMarginalisedParameterError
-from .cpnest import Cpnest
-from .dnest4 import DNest4
-from .dynamic_dynesty import DynamicDynesty
-from .dynesty import Dynesty
-from .emcee import Emcee
-from .fake_sampler import FakeSampler
-from .kombine import Kombine
-from .nessai import Nessai
-from .nestle import Nestle
-from .polychord import PyPolyChord
-from .ptemcee import Ptemcee
-from .ptmcmc import PTMCMCSampler
-from .pymc import Pymc
-from .pymultinest import Pymultinest
-from .ultranest import Ultranest
-from .zeus import Zeus
 
-IMPLEMENTED_SAMPLERS = {
-    "bilby_mcmc": Bilby_MCMC,
-    "cpnest": Cpnest,
-    "dnest4": DNest4,
-    "dynamic_dynesty": DynamicDynesty,
-    "dynesty": Dynesty,
-    "emcee": Emcee,
-    "kombine": Kombine,
-    "nessai": Nessai,
-    "nestle": Nestle,
-    "ptemcee": Ptemcee,
-    "ptmcmcsampler": PTMCMCSampler,
-    "pymc": Pymc,
-    "pymultinest": Pymultinest,
-    "pypolychord": PyPolyChord,
-    "ultranest": Ultranest,
-    "zeus": Zeus,
-    "fake_sampler": FakeSampler,
-}
+
+class ImplementedSamplers:
+    """Dictionary-like object that contains implemented samplers.
+
+    This class is singleton and only one instance can exist.
+    """
+
+    _instance = None
+
+    _samplers = get_entry_points("bilby.samplers")
+
+    def keys(self):
+        """Iterator of available samplers by name.
+
+        Reduces the list to its simplest. This includes removing the 'bilby.'
+        prefix from native samplers if a corresponding plugin is not available.
+        """
+        keys = []
+        for key in self._samplers.keys():
+            name = key.replace("bilby.", "")
+            if name in self._samplers.keys():
+                keys.append(key)
+            else:
+                keys.append(name)
+        return iter(keys)
+
+    def values(self):
+        """Iterator of sampler classes.
+
+        Note: the classes need to loaded using :code:`.load()` before being
+        called.
+        """
+        return iter(self._samplers.values())
+
+    def items(self):
+        """Iterator of tuples containing keys (sampler names) and classes.
+
+        Note: the classes need to loaded using :code:`.load()` before being
+        called.
+        """
+        return iter(((k, v) for k, v in zip(self.keys(), self.values())))
+
+    def valid_keys(self):
+        """All valid keys including bilby.<sampler name>."""
+        keys = set(self._samplers.keys())
+        return iter(keys.union({k.replace("bilby.", "") for k in keys}))
+
+    def __getitem__(self, key):
+        if key in self._samplers:
+            return self._samplers[key]
+        elif f"bilby.{key}" in self._samplers:
+            return self._samplers[f"bilby.{key}"]
+        else:
+            raise ValueError(
+                f"Sampler {key} is not implemented! "
+                f"Available samplers are: {list(self.keys())}"
+            )
+
+    def __contains__(self, value):
+        return value in self.valid_keys()
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+
+IMPLEMENTED_SAMPLERS = ImplementedSamplers()
+
+
+def get_implemented_samplers():
+    """Get a list of the names of the implemented samplers.
+
+    This includes natively supported samplers (e.g. dynesty) and any additional
+    samplers that are supported through the sampler plugins.
+
+    Returns
+    -------
+    list
+        The list of implemented samplers.
+    """
+    return list(IMPLEMENTED_SAMPLERS.keys())
+
+
+def get_sampler_class(sampler):
+    """Get the class for a sampler from its name.
+
+    This includes natively supported samplers (e.g. dynesty) and any additional
+    samplers that are supported through the sampler plugins.
+
+    Parameters
+    ----------
+    sampler : str
+        The name of the sampler.
+
+    Returns
+    -------
+    Sampler
+        The sampler class.
+
+    Raises
+    ------
+    ValueError
+        Raised if the sampler is not implemented.
+    """
+    return IMPLEMENTED_SAMPLERS[sampler.lower()].load()
+
 
 if command_line_args.sampler_help:
     sampler = command_line_args.sampler_help
     if sampler in IMPLEMENTED_SAMPLERS:
-        sampler_class = IMPLEMENTED_SAMPLERS[sampler]
+        sampler_class = IMPLEMENTED_SAMPLERS[sampler].load()
         print(f'Help for sampler "{sampler}":')
         print(sampler_class.__doc__)
     else:
@@ -60,7 +136,7 @@ if command_line_args.sampler_help:
             )
         else:
             print(f"Requested sampler {sampler} not implemented")
-        print(f"Available samplers = {IMPLEMENTED_SAMPLERS}")
+        print(f"Available samplers = {get_implemented_samplers()}")
 
     sys.exit()
 
@@ -103,9 +179,13 @@ def run_sampler(
         `bilby.sampler.get_implemented_samplers()` for a list of available
         samplers.
         Alternatively a Sampler object can be passed
-    use_ratio: bool (False)
-        If True, use the likelihood's log_likelihood_ratio, rather than just
-        the log_likelihood.
+    use_ratio: bool (None)
+        If True, use the likelihood's `log_likelihood_ratio`, rather than just
+        the `log_likelihood`. If left as the default value of `None`, and the
+        likelihood has a valid `log_likelihood_ratio` method, then that method
+        will also be used, i.e., the likelihood ratio will be calculated. To
+        ensure that the `log_likelihood` method is used for the calculation,
+        rather than the likelihood ratio, this argument should be set to False.
     injection_parameters: dict
         A dictionary of injection parameters used in creating the data (if
         using simulated data). Appended to the result object and saved.
@@ -113,6 +193,9 @@ def run_sampler(
         If true, generate a corner plot and, if applicable diagnostic plots
     conversion_function: function, optional
         Function to apply to posterior to generate additional parameters.
+        This function should take one positional argument, a dictionary or
+        pandas dataframe and three optional arguments: the likelihood, prior
+        dict, and an integer :code:`npool` to allow parallelisation.
     default_priors_file: str
         If given, a file containing the default priors; otherwise defaults to
         the bilby defaults for a binary black hole.
@@ -176,6 +259,7 @@ def run_sampler(
     meta_data["likelihood"] = likelihood.meta_data
     meta_data["loaded_modules"] = loaded_modules_dict()
     meta_data["environment_packages"] = env_package_list(as_dataframe=True)
+    meta_data["global_meta_data"] = global_meta_data
 
     if command_line_args.bilby_zero_likelihood_mode:
         from bilby.core.likelihood import ZeroLikelihood
@@ -185,24 +269,20 @@ def run_sampler(
     if isinstance(sampler, Sampler):
         pass
     elif isinstance(sampler, str):
-        if sampler.lower() in IMPLEMENTED_SAMPLERS:
-            sampler_class = IMPLEMENTED_SAMPLERS[sampler.lower()]
-            sampler = sampler_class(
-                likelihood,
-                priors=priors,
-                outdir=outdir,
-                label=label,
-                injection_parameters=injection_parameters,
-                meta_data=meta_data,
-                use_ratio=use_ratio,
-                plot=plot,
-                result_class=result_class,
-                npool=npool,
-                **kwargs,
-            )
-        else:
-            print(IMPLEMENTED_SAMPLERS)
-            raise ValueError(f"Sampler {sampler} not yet implemented")
+        sampler_class = get_sampler_class(sampler)
+        sampler = sampler_class(
+            likelihood,
+            priors=priors,
+            outdir=outdir,
+            label=label,
+            injection_parameters=injection_parameters,
+            meta_data=meta_data,
+            use_ratio=use_ratio,
+            plot=plot,
+            result_class=result_class,
+            npool=npool,
+            **kwargs,
+        )
     elif inspect.isclass(sampler):
         sampler = sampler.__init__(
             likelihood,
@@ -219,7 +299,7 @@ def run_sampler(
     else:
         raise ValueError(
             "Provided sampler should be a Sampler object or name of a known "
-            f"sampler: {', '.join(IMPLEMENTED_SAMPLERS.keys())}."
+            f"sampler: {get_implemented_samplers()}."
         )
 
     if sampler.cached_result:
@@ -262,7 +342,10 @@ def run_sampler(
             result.save_to_file(extension=save, gzip=gzip, outdir=outdir)
 
     if None not in [result.injection_parameters, conversion_function]:
-        result.injection_parameters = conversion_function(result.injection_parameters)
+        result.injection_parameters = conversion_function(
+            result.injection_parameters,
+            likelihood=likelihood,
+        )
 
     # Check if the posterior has already been created
     if getattr(result, "_posterior", None) is None:

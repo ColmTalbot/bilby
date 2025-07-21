@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import MagicMock
 
 import bilby
+import bilby.core.sampler.dynamic_dynesty
 
 
 class TestDynamicDynesty(unittest.TestCase):
@@ -10,7 +11,7 @@ class TestDynamicDynesty(unittest.TestCase):
         self.priors = bilby.core.prior.PriorDict(
             dict(a=bilby.core.prior.Uniform(0, 1), b=bilby.core.prior.Uniform(0, 1))
         )
-        self.sampler = bilby.core.sampler.DynamicDynesty(
+        self.sampler = bilby.core.sampler.dynamic_dynesty.DynamicDynesty(
             self.likelihood,
             self.priors,
             outdir="outdir",
@@ -27,7 +28,13 @@ class TestDynamicDynesty(unittest.TestCase):
 
     def test_default_kwargs(self):
         """Only test the kwargs where we specify different defaults to dynesty"""
-        expected = dict(sample="rwalk", facc=0.2, save_bounds=False)
+        expected = dict(
+            sample="act-walk",
+            bound="live",
+            facc=0.2,
+            save_bounds=False,
+            update_interval=600,
+        )
         for key in expected:
             self.assertEqual(expected[key], self.sampler.kwargs[key])
 

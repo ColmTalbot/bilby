@@ -1,5 +1,6 @@
 import os
 import sys
+import warnings
 
 import numpy as np
 from pandas import DataFrame
@@ -12,6 +13,11 @@ from .base_sampler import NestedSampler, signal_wrapper
 class Nessai(NestedSampler):
     """bilby wrapper of nessai (https://github.com/mj-will/nessai)
 
+    .. warning::
+        The nessai sampler interface in bilby is deprecated and will be
+        removed in future release. Please use the :code`nessai-bilby`
+        sampler plugin instead: https://github.com/bilby-dev/nessai-bilby
+
     All positional and keyword arguments passed to `run_sampler` are propagated
     to `nessai.flowsampler.FlowSampler`
 
@@ -20,9 +26,17 @@ class Nessai(NestedSampler):
     Documentation: https://nessai.readthedocs.io/
     """
 
+    sampler_name = "nessai"
     _default_kwargs = None
     _run_kwargs_list = None
     sampling_seed_key = "seed"
+
+    msg = (
+        "The nessai sampler interface in bilby is deprecated and will"
+        " be removed in future release. Please use the `nessai-bilby`"
+        "sampler plugin instead: https://github.com/bilby-dev/nessai-bilby."
+    )
+    warnings.warn(msg, FutureWarning)
 
     @property
     def run_kwargs_list(self):
@@ -197,6 +211,7 @@ class Nessai(NestedSampler):
         # Manually set likelihood evaluations because parallelisation breaks the counter
         self.result.num_likelihood_evaluations = self.fs.ns.total_likelihood_evaluations
 
+        self.result.sampling_time = self.fs.ns.sampling_time
         self.result.samples = live_points_to_array(
             self.fs.posterior_samples, self.search_parameter_keys
         )
@@ -298,6 +313,31 @@ class Nessai(NestedSampler):
             logger.warning("Sampler is not initialized")
         self._log_interruption(signum=signum)
         sys.exit(self.exit_code)
+
+    @classmethod
+    def get_expected_outputs(cls, outdir=None, label=None):
+        """Get lists of the expected outputs directories and files.
+
+        These are used by :code:`bilby_pipe` when transferring files via HTCondor.
+
+        Parameters
+        ----------
+        outdir : str
+            The output directory.
+        label : str
+            The label for the run.
+
+        Returns
+        -------
+        list
+            List of file names. This will be empty for nessai.
+        list
+            List of directory names.
+        """
+        dirs = [os.path.join(outdir, f"{label}_{cls.sampler_name}", "")]
+        dirs += [os.path.join(dirs[0], d, "") for d in ["proposal", "diagnostics"]]
+        filenames = []
+        return filenames, dirs
 
     def _setup_pool(self):
         pass

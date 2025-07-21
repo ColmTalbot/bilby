@@ -1,4 +1,43 @@
-""" Functions for adding calibration factors to waveform templates.
+r"""
+Functions for adding calibration factors to waveform templates.
+
+The two key quantities are :math:`d`, the (possible mis-)calibrated strain
+data used for the analysis, and :math:`h`, the theoretical strain predicted by
+the waveform model.
+
+There are two conventions in the literature for how to specify calibration
+corrections. People who work on gravitational-wave detector calibration
+typically describe a correction to the data so that the signal matches the
+theoretical prediction
+
+.. math::
+
+    h = \eta d.
+
+However, when performing inference, we are interested in the correction that
+must be applied to the theoretical strain to match the signal contained within
+the data
+
+.. math::
+
+    d = \alpha h.
+
+Clearly, these are related via
+
+.. math::
+
+    \eta = \frac{1}{\alpha}
+
+Internally, in :code:`Bilby`, the correction is always :math:`\alpha`.
+However, when reading in a data product describing calibration uncertainty,
+e.g., uncertainty envelopes or estimated response curves, the user should
+specify which method is being used as :code:`"data"` for :math:`\eta` or
+:code:`"template"` for :math:`\alpha`.
+
+.. note::
+    In general, data products produced by the LVK calibration groups use the
+    :code:`"data"` convention.
+
 """
 import copy
 import os
@@ -12,9 +51,34 @@ from ...core.prior.dict import PriorDict
 from ..prior import CalibrationPriorDict
 
 
-def read_calibration_file(filename, frequency_array, number_of_response_curves, starting_index=0):
-    """
-    Function to read the hdf5 files from the calibration group containing the physical calibration response curves.
+def _check_calibration_correction_type(correction_type):
+    if correction_type is None:
+        logger.warning(
+            "Calibration envelope correction type is not specified. "
+            "Assuming this correction maps calibrated data to theoretical "
+            "strain. If this is correct, this should be explicitly "
+            "specified via CalibrationPriorDict.from_envelope_file(..., "
+            "correction_type='data'). The other possibility is correction_type="
+            "'template', which maps theoretical strain to calibrated data."
+        )
+        correction_type = "data"
+    if correction_type.lower() not in ["data", "template"]:
+        raise ValueError(
+            "Calibration envelope correction should be one of 'data' or "
+            f"'template', found {correction_type}."
+        )
+    logger.debug(
+        f"Supplied calibration correction will be applied to the {correction_type}"
+    )
+    return correction_type
+
+
+def read_calibration_file(
+    filename, frequency_array, number_of_response_curves, starting_index=0, correction_type=None
+):
+    r"""
+    Function to read the hdf5 files from the calibration group containing the
+    physical calibration response curves.
 
     Parameters
     ----------
@@ -27,6 +91,14 @@ def read_calibration_file(filename, frequency_array, number_of_response_curves, 
     starting_index: int
         Index of the first curve to use within the array. This allows for segmenting the calibration curve array
         into smaller pieces.
+    correction_type: str
+        How the correction is defined, either to the :code:`data`
+        (default) or the :code:`template`. In general, data products
+        produced by the LVK calibration groups assume :code:`data`.
+        The default value will be removed in a future release and
+        this will need to be explicitly specified.
+
+        .. versionadded:: 1.4.0
 
     Returns
     -------
@@ -36,6 +108,8 @@ def read_calibration_file(filename, frequency_array, number_of_response_curves, 
 
     """
     import tables
+
+    correction_type = _check_calibration_correction_type(correction_type=correction_type)
 
     logger.info(f"Reading calibration draws from {filename}")
     calibration_file = tables.open_file(filename, 'r')
@@ -58,6 +132,8 @@ def read_calibration_file(filename, frequency_array, number_of_response_curves, 
     calibration_draws = interp1d(
         calibration_frequencies, calibration_draws, kind='cubic',
         bounds_error=False, fill_value=1)(frequency_array)
+    if correction_type == "data":
+        calibration_draws = 1 / calibration_draws
 
     try:
         parameter_draws = pd.read_hdf(filename, key="CalParams")
@@ -67,7 +143,9 @@ def read_calibration_file(filename, frequency_array, number_of_response_curves, 
     return calibration_draws, parameter_draws
 
 
-def write_calibration_file(filename, frequency_array, calibration_draws, calibration_parameter_draws=None):
+def write_calibration_file(
+    filename, frequency_array, calibration_draws, calibration_parameter_draws=None, correction_type=None
+):
     """
     Function to write the generated response curves to file
 
@@ -82,9 +160,22 @@ def write_calibration_file(filename, frequency_array, calibration_draws, calibra
         Shape is (number_of_response_curves x len(frequency_array))
     calibration_parameter_draws: data_frame
         Parameters used to generate the random draws of the calibration response curves
+    correction_type: str
+        How the correction is defined, either to the :code:`data`
+        (default) or the :code:`template`. In general, data products
+        produced by the LVK calibration groups assume :code:`data`.
+        The default value will be removed in a future release and
+        this will need to be explicitly specified.
+
+        .. versionadded:: 1.4.0
 
     """
     import tables
+
+    correction_type = _check_calibration_correction_type(correction_type=correction_type)
+
+    if correction_type == "data":
+        calibration_draws = 1 / calibration_draws
 
     logger.info(f"Writing calibration draws to {filename}")
     calibration_file = tables.open_file(filename, 'w')
@@ -183,12 +274,61 @@ class CubicSpline(Recalibrate):
             np.log10(minimum_frequency), np.log10(maximum_frequency), n_points)
 
     @property
+    def delta_log_spline_points(self):
+        if not hasattr(self, "_delta_log_spline_points"):
+            self._delta_log_spline_points = self._log_spline_points[1] - self._log_spline_points[0]
+        return self._delta_log_spline_points
+
+    @property
+    def nodes_to_spline_coefficients(self):
+        if not hasattr(self, "_nodes_to_spline_coefficients"):
+            self._setup_spline_coefficients()
+        return self._nodes_to_spline_coefficients
+
+    def _setup_spline_coefficients(self):
+        """
+        Precompute matrix converting values at nodes to spline coefficients.
+        The algorithm for interpolation is described in
+        https://dcc.ligo.org/LIGO-T2300140, and the matrix calculated here is
+        to solve Eq. (9) in the note.
+        """
+        tmp1 = np.zeros(shape=(self.n_points, self.n_points))
+        tmp1[0, 0] = -1
+        tmp1[0, 1] = 2
+        tmp1[0, 2] = -1
+        tmp1[-1, -3] = -1
+        tmp1[-1, -2] = 2
+        tmp1[-1, -1] = -1
+        for i in range(1, self.n_points - 1):
+            tmp1[i, i - 1] = 1 / 6
+            tmp1[i, i] = 2 / 3
+            tmp1[i, i + 1] = 1 / 6
+        tmp2 = np.zeros(shape=(self.n_points, self.n_points))
+        for i in range(1, self.n_points - 1):
+            tmp2[i, i - 1] = 1
+            tmp2[i, i] = -2
+            tmp2[i, i + 1] = 1
+        self._nodes_to_spline_coefficients = np.linalg.solve(tmp1, tmp2)
+
+    @property
     def log_spline_points(self):
         return self._log_spline_points
 
     def __repr__(self):
         return self.__class__.__name__ + '(prefix=\'{}\', minimum_frequency={}, maximum_frequency={}, n_points={})'\
             .format(self.prefix, self.minimum_frequency, self.maximum_frequency, self.n_points)
+
+    def _evaluate_spline(self, kind, a, b, c, d, previous_nodes):
+        """Evaluate Eq. (1) in https://dcc.ligo.org/LIGO-T2300140"""
+        parameters = np.array([self.params[f"{kind}_{ii}"] for ii in range(self.n_points)])
+        next_nodes = previous_nodes + 1
+        spline_coefficients = self.nodes_to_spline_coefficients.dot(parameters)
+        return (
+            a * parameters[previous_nodes]
+            + b * parameters[next_nodes]
+            + c * spline_coefficients[previous_nodes]
+            + d * spline_coefficients[next_nodes]
+        )
 
     def get_calibration_factor(self, frequency_array, **params):
         """Apply calibration model
@@ -208,19 +348,19 @@ class CubicSpline(Recalibrate):
         calibration_factor : array-like
             The factor to multiply the strain by.
         """
+        log10f_per_deltalog10f = (
+            np.log10(frequency_array) - self.log_spline_points[0]
+        ) / self.delta_log_spline_points
+        previous_nodes = np.clip(np.floor(log10f_per_deltalog10f).astype(int), a_min=0, a_max=self.n_points - 2)
+        b = log10f_per_deltalog10f - previous_nodes
+        a = 1 - b
+        c = (a**3 - a) / 6
+        d = (b**3 - b) / 6
+
         self.set_calibration_parameters(**params)
-        amplitude_parameters = [self.params['amplitude_{}'.format(ii)]
-                                for ii in range(self.n_points)]
-        delta_amplitude = interp1d(
-            self.log_spline_points, amplitude_parameters, kind='cubic',
-            bounds_error=False, fill_value=0)(np.log10(frequency_array))
 
-        phase_parameters = [
-            self.params['phase_{}'.format(ii)] for ii in range(self.n_points)]
-        delta_phase = interp1d(
-            self.log_spline_points, phase_parameters, kind='cubic',
-            bounds_error=False, fill_value=0)(np.log10(frequency_array))
-
+        delta_amplitude = self._evaluate_spline("amplitude", a, b, c, d, previous_nodes)
+        delta_phase = self._evaluate_spline("phase", a, b, c, d, previous_nodes)
         calibration_factor = (1 + delta_amplitude) * (2 + 1j * delta_phase) / (2 - 1j * delta_phase)
 
         return calibration_factor
@@ -288,7 +428,7 @@ class Precomputed(Recalibrate):
 
     @classmethod
     def from_envelope_file(
-        cls, envelope, frequency_array, n_nodes, label, n_curves
+        cls, envelope, frequency_array, n_nodes, label, n_curves, correction_type
     ):
         priors = CalibrationPriorDict.from_envelope_file(
             envelope_file=envelope,
@@ -296,6 +436,7 @@ class Precomputed(Recalibrate):
             maximum_frequency=frequency_array[-1],
             n_nodes=n_nodes,
             label=label,
+            correction_type=correction_type,
         )
         parameters = pd.DataFrame(priors.sample(n_curves))
         curves = curves_from_spline_and_prior(

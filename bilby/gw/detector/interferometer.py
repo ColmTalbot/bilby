@@ -9,6 +9,7 @@ from bilby_cython.geometry import (
 
 from ...core import utils
 from ...core.utils import docstring, logger, PropertyAccessor, safe_file_dump
+from ...core.utils.env import string_to_boolean
 from .. import utils as gwutils
 from .calibration import Recalibrate
 from .geometry import InterferometerGeometry
@@ -90,7 +91,7 @@ class Interferometer(object):
         self.strain_data = InterferometerStrainData(
             minimum_frequency=minimum_frequency,
             maximum_frequency=maximum_frequency)
-        self.meta_data = dict()
+        self.meta_data = dict(name=name)
 
     def __eq__(self, other):
         if self.name == other.name and \
@@ -492,6 +493,19 @@ class Interferometer(object):
             logger.info('  {} = {}'.format(key, parameters[key]))
 
     @property
+    def _window_power_correction(self):
+        """
+        This property enables the old (incorrect) PSD correction to be applied
+        using the :code:`BILBY_INCORRECT_PSD_NORMALIZATION` environment variable.
+        """
+        if string_to_boolean(
+            os.environ.get("BILBY_INCORRECT_PSD_NORMALIZATION", "FALSE").upper()
+        ):
+            return self.strain_data.window_factor
+        else:
+            return 1
+
+    @property
     def amplitude_spectral_density_array(self):
         """ Returns the amplitude spectral density (ASD) given we know a power spectral density (PSD)
 
@@ -500,10 +514,9 @@ class Interferometer(object):
         array_like: An array representation of the ASD
 
         """
-        return (
-            self.power_spectral_density.get_amplitude_spectral_density_array(
-                frequency_array=self.strain_data.frequency_array) *
-            self.strain_data.window_factor**0.5)
+        return self.power_spectral_density.get_amplitude_spectral_density_array(
+            frequency_array=self.strain_data.frequency_array
+        ) * self._window_power_correction**0.5
 
     @property
     def power_spectral_density_array(self):
@@ -516,10 +529,9 @@ class Interferometer(object):
         array_like: An array representation of the PSD
 
         """
-        return (
-            self.power_spectral_density.get_power_spectral_density_array(
-                frequency_array=self.strain_data.frequency_array) *
-            self.strain_data.window_factor)
+        return self.power_spectral_density.get_power_spectral_density_array(
+            frequency_array=self.strain_data.frequency_array
+        ) * self._window_power_correction
 
     def unit_vector_along_arm(self, arm):
         logger.warning("This method has been moved and will be removed in the future."
@@ -597,6 +609,26 @@ class Interferometer(object):
             power_spectral_density=self.power_spectral_density_array[self.strain_data.frequency_mask],
             duration=self.strain_data.duration)
 
+    def template_template_inner_product(self, signal_1, signal_2):
+        """A noise weighted inner product between two templates, using this ifo's PSD.
+
+        Parameters
+        ==========
+        signal_1 : array_like
+            An array containing the first signal
+        signal_2 : array_like
+            an array containing the second signal
+
+        Returns
+        =======
+        float: The noise weighted inner product of the two templates
+        """
+        return gwutils.noise_weighted_inner_product(
+            aa=signal_1[self.strain_data.frequency_mask],
+            bb=signal_2[self.strain_data.frequency_mask],
+            power_spectral_density=self.power_spectral_density_array[self.strain_data.frequency_mask],
+            duration=self.strain_data.duration)
+
     def matched_filter_snr(self, signal):
         """
 
@@ -607,7 +639,7 @@ class Interferometer(object):
 
         Returns
         =======
-        float: The matched filter signal to noise ratio squared
+        complex: The matched filter signal to noise ratio
 
         """
         return gwutils.matched_filter_snr(
@@ -616,19 +648,95 @@ class Interferometer(object):
             power_spectral_density=self.power_spectral_density_array[self.strain_data.frequency_mask],
             duration=self.strain_data.duration)
 
+    def whiten_frequency_series(self, frequency_series : np.array) -> np.array:
+        """Whitens a frequency series with the noise properties of the detector
+
+        .. math::
+            \\tilde{a}_w(f) = \\tilde{a}(f) \\sqrt{\\frac{4}{T S_n(f)}}
+
+        Such that
+
+        .. math::
+            Var(n) = \\frac{1}{N} \\sum_{k=0}^N n_W(f_k)n_W^*(f_k) = 2
+
+        Where the factor of two is due to the independent real and imaginary
+        components.
+
+        Parameters
+        ==========
+        frequency_series : np.array
+            The frequency series, whitened by the ASD
+        """
+        return frequency_series / (self.amplitude_spectral_density_array * np.sqrt(self.duration / 4))
+
+    def get_whitened_time_series_from_whitened_frequency_series(
+        self,
+        whitened_frequency_series : np.array
+    ) -> np.array:
+        """Gets the whitened time series from a whitened frequency series.
+
+        This ifft's and also applies a windowing factor,
+        since when f_min and f_max are set bilby applies a mask to the series.
+
+        Per 6.2a-b in https://arxiv.org/pdf/gr-qc/0509116 since our window
+        is just a band pass,
+        this coefficient is :math:`w/W` where
+
+        .. math::
+
+            W = \\frac{1}{N} \\sum_{k=0}^N w^2[j]
+
+        Since our window :math:`w` is simply 1 or 0, depending on the mask, we get
+
+        .. math::
+
+            W = \\frac{1}{N} \\sum_{k=0}^N \\Theta(f_{max} - f_k)\\Theta(f_k - f_{min})
+
+        and accordingly the termwise window factor is
+
+        .. math::
+            w = \\sqrt{N W} = \\sqrt{\\sum_{k=0}^N \\Theta(f_{max} - f_k)\\Theta(f_k - f_{min})}
+
+        """
+        frequency_window_factor = (
+            np.sum(self.frequency_mask)
+            / len(self.frequency_mask)
+        )
+
+        whitened_time_series = (
+            np.fft.irfft(whitened_frequency_series)
+            * np.sqrt(np.sum(self.frequency_mask)) / frequency_window_factor
+        )
+
+        return whitened_time_series
+
     @property
     def whitened_frequency_domain_strain(self):
-        """ Calculates the whitened data by dividing the frequency domain data by
-        ((amplitude spectral density) * (duration / 4) ** 0.5). The resulting
-        data will have unit variance.
+        r"""Whitens the frequency domain data by dividing through by ASD,
+        with appropriate normalization.
+
+        See `whiten_frequency_series()` for details.
 
         Returns
         =======
         array_like: The whitened data
         """
-        return self.strain_data.frequency_domain_strain / (
-            self.amplitude_spectral_density_array * np.sqrt(self.duration / 4)
-        )
+        return self.whiten_frequency_series(self.strain_data.frequency_domain_strain)
+
+    @property
+    def whitened_time_domain_strain(self) -> np.array:
+        """Calculates the whitened time domain strain
+        by iffting the whitened frequency domain strain,
+        with the appropriate normalization.
+
+        See `get_whitened_time_series_from_whitened_frequency_series()` for details
+
+        Returns
+        =======
+        array_like
+            The whitened data in the time domain
+        """
+        return self.get_whitened_time_series_from_whitened_frequency_series(self.whitened_frequency_domain_strain)
 
     def save_data(self, outdir, label=None):
         """ Creates save files for interferometer data in plain text format.

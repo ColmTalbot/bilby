@@ -8,10 +8,9 @@ from scipy.stats import gaussian_kde
 
 from ..core.fisher import FisherMatrixPosteriorEstimator
 from ..core.prior import PriorDict
-from ..core.sampler.base_sampler import SamplerError, _sampling_convenience_dump
-from ..core.utils import logger, reflect
+from ..core.sampler.base_sampler import SamplerError
+from ..core.utils import logger, random, reflect
 from ..gw.source import PARAMETER_SETS
-from .utils import LOGLKEY, LOGPKEY
 
 
 class ProposalCycle(object):
@@ -138,9 +137,16 @@ class BaseProposal(object):
         val_normalised_reflected = reflect(np.array(val_normalised))
         return minimum + width * val_normalised_reflected
 
-    def __call__(self, chain):
-        sample, log_factor = self.propose(chain)
-        sample = self.apply_boundaries(sample)
+    def __call__(self, chain, likelihood=None, priors=None):
+
+        if getattr(self, "needs_likelihood_and_priors", False):
+            sample, log_factor = self.propose(chain, likelihood, priors)
+        else:
+            sample, log_factor = self.propose(chain)
+
+        if log_factor == 0:
+            sample = self.apply_boundaries(sample)
+
         return sample, log_factor
 
     @abstractmethod
@@ -217,7 +223,7 @@ class FixedGaussianProposal(BaseProposal):
         sample = chain.current_sample
         for key in self.parameters:
             sigma = self.prior_width_dict[key] * self.sigmas[key]
-            sample[key] += sigma * np.random.randn()
+            sample[key] += sigma * random.rng.normal(0, 1)
         log_factor = 0
         return sample, log_factor
 
@@ -254,15 +260,15 @@ class AdaptiveGaussianProposal(BaseProposal):
     def propose(self, chain):
         sample = chain.current_sample
         self.update_scale(chain)
-        if np.random.random() < 1e-3:
+        if random.rng.uniform(0, 1) < 1e-3:
             factor = 1e1
-        elif np.random.random() < 1e-4:
+        elif random.rng.uniform(0, 1) < 1e-4:
             factor = 1e2
         else:
             factor = 1
         for key in self.parameters:
             sigma = factor * self.scale * self.prior_width_dict[key] * self.sigmas[key]
-            sample[key] += sigma * np.random.randn()
+            sample[key] += sigma * random.rng.normal(0, 1)
         log_factor = 0
         return sample, log_factor
 
@@ -340,7 +346,7 @@ class UniformProposal(BaseProposal):
         for key in self.parameters:
             width = self.prior_width_dict[key]
             if np.isinf(width) is False:
-                sample[key] = np.random.uniform(
+                sample[key] = random.rng.uniform(
                     self.prior_minimum_dict[key], self.prior_maximum_dict[key]
                 )
             else:
@@ -462,7 +468,7 @@ class DensityEstimateProposal(BaseProposal):
 
         # Print a log message
         took = time.time() - start
-        logger.info(
+        logger.debug(
             f"{self.density_name} construction at {self.steps_since_refit} finished"
             f" for length {chain.position} chain, took {took:0.2f}s."
             f" Current accept-ratio={self.acceptance_ratio:0.2f}"
@@ -483,7 +489,7 @@ class DensityEstimateProposal(BaseProposal):
                 fail_parameters.append(key)
 
         if len(fail_parameters) > 0:
-            logger.info(
+            logger.debug(
                 f"{self.density_name} construction failed verification and is discarded"
             )
             self.density = current_density
@@ -496,7 +502,10 @@ class DensityEstimateProposal(BaseProposal):
         # Check if we refit
         testA = self.steps_since_refit >= self.next_refit_time
         if testA:
-            self.refit(chain)
+            try:
+                self.refit(chain)
+            except Exception as e:
+                logger.warning(f"Failed to refit chain due to error {e}")
 
         # If KDE is yet to be fitted, use the fallback
         if self.trained is False:
@@ -659,7 +668,7 @@ class NormalizingFlowProposal(DensityEstimateProposal):
         return np.power(max_js, 2)
 
     def train(self, chain):
-        logger.info("Starting NF training")
+        logger.debug("Starting NF training")
 
         import torch
 
@@ -690,14 +699,14 @@ class NormalizingFlowProposal(DensityEstimateProposal):
                     validation_samples, training_samples_draw
                 )
                 if max_js_bits < max_js_threshold:
-                    logger.info(
+                    logger.debug(
                         f"Training complete after {epoch} steps, "
                         f"max_js_bits={max_js_bits:0.5f}<{max_js_threshold}"
                     )
                     break
 
         took = time.time() - start
-        logger.info(
+        logger.debug(
             f"Flow training step ({self.steps_since_refit}) finished"
             f" for length {chain.position} chain, took {took:0.2f}s."
             f" Current accept-ratio={self.acceptance_ratio:0.2f}"
@@ -718,7 +727,10 @@ class NormalizingFlowProposal(DensityEstimateProposal):
         # Check if we retrain the NF
         testA = self.steps_since_refit >= self.next_refit_time
         if testA:
-            self.train(chain)
+            try:
+                self.train(chain)
+            except Exception as e:
+                logger.warning(f"Failed to retrain chain due to error {e}")
 
         if self.trained is False:
             return self.fallback.propose(chain)
@@ -741,10 +753,10 @@ class NormalizingFlowProposal(DensityEstimateProposal):
 
     @staticmethod
     def check_dependencies(warn=True):
-        if importlib.util.find_spec("nflows") is None:
+        if importlib.util.find_spec("glasflow") is None:
             if warn:
                 logger.warning(
-                    "Unable to utilise NormalizingFlowProposal as nflows is not installed"
+                    "Unable to utilise NormalizingFlowProposal as glasflow is not installed"
                 )
             return False
         else:
@@ -765,17 +777,18 @@ class FixedJumpProposal(BaseProposal):
     def propose(self, chain):
         sample = chain.current_sample
         for key, jump in self.jumps.items():
-            sign = np.random.randint(2) * 2 - 1
+            sign = random.rng.integers(2) * 2 - 1
             sample[key] += sign * jump + self.epsilon * self.prior_width_dict[key]
         log_factor = 0
         return sample, log_factor
 
     @property
     def epsilon(self):
-        return self.scale * np.random.normal()
+        return self.scale * random.rng.normal()
 
 
 class FisherMatrixProposal(AdaptiveGaussianProposal):
+    needs_likelihood_and_priors = True
     """Fisher Matrix Proposals
 
     Uses a finite differencing approach motivated by BayesWave (see, e.g.
@@ -802,46 +815,27 @@ class FisherMatrixProposal(AdaptiveGaussianProposal):
         self.adapt = adapt
         self.mean = np.zeros(len(self.parameters))
         self.fd_eps = fd_eps
-        self.last_ln_post = -np.inf
-        self.cholesky = None
-        self.fmp = FisherMatrixPosteriorEstimator(
-            likelihood=_sampling_convenience_dump.likelihood,
-            priors=priors,
-            parameters=self.parameters,
-            fd_eps=self.fd_eps,
-        )
 
-    def update(self, sample=None):
-        """
-        The fisher matrix only updates if the current point has a higher
-        posterior density than the last update.
-        """
-        ln_post = sample[LOGLKEY] + sample[LOGPKEY]
-        if ln_post > self.last_ln_post or self.cholesky is None:
-            try:
-                ifim = self.fmp.calculate_iFIM(sample.dict)
-                self.cholesky = np.linalg.cholesky(ifim)
-            except (RuntimeError, np.linalg.LinAlgError):
-                logger.warning(
-                    f"Failed to compute Fisher matrix for {self.parameters} and {sample}"
-                )
-                if self.cholesky is None:
-                    raise
-            logger.info(f"Updating Fisher matrix proposal for {self.parameters}")
-            self.last_ln_post = ln_post
-            self.steps_since_update = 0
-
-    def propose(self, chain):
+    def propose(self, chain, likelihood, priors):
         sample = chain.current_sample
         if self.adapt:
             self.update_scale(chain)
-
-        if self.cholesky is None:
-            self.update(sample)
         if self.steps_since_update >= self.update_interval:
-            self.update(sample)
+            fmp = FisherMatrixPosteriorEstimator(
+                likelihood, priors, parameters=self.parameters, fd_eps=self.fd_eps
+            )
+            try:
+                self.iFIM = fmp.calculate_iFIM(sample.dict)
+            except (RuntimeError, ValueError, np.linalg.LinAlgError) as e:
+                logger.warning(f"FisherMatrixProposal failed with {e}")
+                if hasattr(self, "iFIM") is False:
+                    # No past iFIM exists, return sample
+                    return sample, 0
+            self.steps_since_update = 0
 
-        jump = self.scale * np.dot(self.cholesky, np.random.normal(0, 1, self.ndim))
+        jump = self.scale * random.rng.multivariate_normal(
+            self.mean, self.iFIM, check_valid="ignore"
+        )
 
         for key, val in zip(self.parameters, jump):
             sample[key] += val
@@ -902,11 +896,11 @@ class CorrelatedPolarisationPhaseJump(BaseGravitationalWaveTransientProposal):
         alpha = sample["psi"] + phase
         beta = sample["psi"] - phase
 
-        draw = np.random.random()
+        draw = random.rng.random()
         if draw < 0.5:
-            alpha = 3.0 * np.pi * np.random.random()
+            alpha = 3.0 * np.pi * random.rng.random()
         else:
-            beta = 3.0 * np.pi * np.random.random() - 2 * np.pi
+            beta = 3.0 * np.pi * random.rng.random() - 2 * np.pi
 
         # Update
         sample["psi"] = (alpha + beta) * 0.5
@@ -941,7 +935,7 @@ class PhaseReversalProposal(BaseGravitationalWaveTransientProposal):
     @property
     def epsilon(self):
         if self.fuzz:
-            return np.random.normal(0, self.fuzz_sigma)
+            return random.rng.normal(0, self.fuzz_sigma)
         else:
             return 0
 
@@ -1022,7 +1016,7 @@ def _differential_move(sample, theta1, theta2, mode_hopping_frac, ndim, paramete
 
 def _stretch_move(sample, complement, scale, ndim, parameters):
     # Draw z
-    u = np.random.rand()
+    u = random.rng.uniform(0, 1)
     z = (u * (scale - 1) + 1) ** 2 / scale
 
     log_factor = (ndim - 1) * np.log(z)
@@ -1041,7 +1035,8 @@ class EnsembleProposal(BaseProposal):
 
     def __call__(self, chain, chain_complement):
         sample, log_factor = self.propose(chain, chain_complement)
-        sample = self.apply_boundaries(sample)
+        if log_factor == 0:
+            sample = self.apply_boundaries(sample)
         return sample, log_factor
 
 
@@ -1065,7 +1060,7 @@ class EnsembleStretch(EnsembleProposal):
     def propose(self, chain, chain_complement):
         sample = chain.current_sample
         completement = chain_complement[
-            np.random.randint(len(chain_complement))
+            random.rng.integers(len(chain_complement))
         ].current_sample
         return _stretch_move(
             sample, completement, self.scale, self.ndim, self.parameters
@@ -1177,7 +1172,7 @@ def get_proposal_cycle(string, priors, L1steps=1, warn=True):
                 ),
                 FisherMatrixProposal(
                     priors,
-                    weight=big_weight,
+                    weight=small_weight,
                     subset=mass,
                 ),
             ]
@@ -1241,6 +1236,12 @@ def get_proposal_cycle(string, priors, L1steps=1, warn=True):
                     weight=small_weight,
                     subset=sky,
                 ),
+                GMMProposal(
+                    priors,
+                    weight=small_weight,
+                    subset=sky,
+                    **learning_kwargs,
+                ),
             ]
         if priors.distance_inclination:
             distance_inclination = PARAMETER_SETS["distance_inclination"]
@@ -1251,15 +1252,8 @@ def get_proposal_cycle(string, priors, L1steps=1, warn=True):
                     subset=distance_inclination,
                 ),
             ]
-        for key in [
-            "time_jitter",
-            "psi",
-            "phi_jl",
-            "phi_12",
-            "tilt_2",
-            "lambda_1",
-            "lambda_2",
-        ]:
+
+        for key in ["time_jitter", "psi", "phi_12", "tilt_2", "lambda_1", "lambda_2"]:
             if key in priors.non_fixed_keys:
                 plist.append(PriorProposal(priors, subset=[key], weight=tiny_weight))
         for key in ["chirp_mass"]:
@@ -1277,6 +1271,7 @@ def get_proposal_cycle(string, priors, L1steps=1, warn=True):
             DifferentialEvolutionProposal(priors, weight=big_weight),
             UniformProposal(priors, weight=tiny_weight),
             KDEProposal(priors, weight=big_weight, scale_fits=L1steps),
+            FisherMatrixProposal(priors, weight=big_weight),
         ]
         if GMMProposal.check_dependencies(warn=warn):
             plist.append(GMMProposal(priors, weight=big_weight, scale_fits=L1steps))

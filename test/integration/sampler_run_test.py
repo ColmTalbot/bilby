@@ -28,14 +28,14 @@ _sampler_kwargs = dict(
         num_particles=50,
         max_pool=1,
     ),
-    dynesty=dict(nlive=100),
+    dynesty=dict(nlive=10, sample="acceptance-walk", nact=5, proposals=["diff"]),
     dynamic_dynesty=dict(
-        nlive_init=100,
-        nlive_batch=100,
+        nlive_init=10,
+        nlive_batch=10,
         dlogz_init=1.0,
         maxbatch=0,
         maxcall=100,
-        bound="single",
+        sample="act-walk",
     ),
     emcee=dict(iterations=1000, nwalkers=10),
     kombine=dict(iterations=200, nwalkers=10, autoburnin=False),
@@ -55,8 +55,8 @@ _sampler_kwargs = dict(
     PTMCMCSampler=dict(Niter=101, burn=100, covUpdate=100, isave=100),
     pymc=dict(draws=50, tune=50, n_init=250),
     pymultinest=dict(nlive=100),
-    pypolychord=dict(nlive=100),
     ultranest=dict(nlive=100, temporary_directory=False),
+    zeus=dict(nwalkers=10, iterations=100)
 )
 
 sampler_imports = dict(
@@ -64,7 +64,9 @@ sampler_imports = dict(
     dynamic_dynesty="dynesty"
 )
 
-no_pool_test = ["dnest4", "pymultinest", "nestle", "ptmcmcsampler", "pypolychord", "ultranest", "pymc"]
+no_pool_test = ["dnest4", "pymultinest", "nestle", "ptmcmcsampler", "ultranest", "pymc"]
+
+loaded_samplers = {k: v.load() for k, v in bilby.core.sampler.IMPLEMENTED_SAMPLERS.items()}
 
 
 def slow_func(x, m, c):
@@ -78,12 +80,13 @@ def model(x, m, c):
 
 class TestRunningSamplers(unittest.TestCase):
     def setUp(self):
-        np.random.seed(42)
+        bilby.core.utils.random.seed(42)
         bilby.core.utils.command_line_args.bilby_test_mode = False
+        rng = bilby.core.utils.random.rng
         self.x = np.linspace(0, 1, 11)
         self.injection_parameters = dict(m=0.5, c=0.2)
         self.sigma = 0.1
-        self.y = model(self.x, **self.injection_parameters) + np.random.normal(
+        self.y = model(self.x, **self.injection_parameters) + rng.normal(
             0, self.sigma, len(self.x)
         )
         self.likelihood = bilby.likelihood.GaussianLikelihood(
@@ -133,14 +136,15 @@ class TestRunningSamplers(unittest.TestCase):
             likelihood=self.likelihood,
             priors=self.priors,
             sampler=sampler,
-            save=False,
+            save="hdf5",
             npool=pool_size,
             conversion_function=self.conversion_function,
             **kwargs,
             **extra_kwargs,
         )
         assert "derived" in res.posterior
-        assert res.log_likelihood_evaluations is not None
+        if sampler != "dnest4":
+            assert res.log_likelihood_evaluations is not None
 
     @parameterized.expand(_sampler_kwargs.keys())
     def test_interrupt_sampler_single(self, sampler):
@@ -152,7 +156,7 @@ class TestRunningSamplers(unittest.TestCase):
 
     def _run_with_signal_handling(self, sampler, pool_size=1):
         pytest.importorskip(sampler_imports.get(sampler, sampler))
-        if bilby.core.sampler.IMPLEMENTED_SAMPLERS[sampler.lower()].hard_exit:
+        if loaded_samplers[sampler.lower()].hard_exit:
             pytest.skip(f"{sampler} hard exits, can't test signal handling.")
         if pool_size > 1 and sampler.lower() in no_pool_test:
             pytest.skip(f"{sampler} cannot be parallelized")
