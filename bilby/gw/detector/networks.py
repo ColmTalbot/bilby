@@ -205,7 +205,7 @@ class InterferometerList(list):
 
     def plot_time_domain_data(
         self, outdir=".", label=None, bandpass_frequencies=(50, 250),
-        notches=None, start_end=None, t0=None
+        notches=None, start_end=None, t0=None, crop=0, whiten=False,
     ):
         """Plots the strain data in the time domain for each of the
         interfeormeters
@@ -237,7 +237,9 @@ class InterferometerList(list):
                 bandpass_frequencies=bandpass_frequencies,
                 notches=notches,
                 start_end=start_end,
-                t0=t0
+                t0=t0,
+                crop=crop,
+                whiten=whiten,
             )
 
     @property

@@ -811,8 +811,9 @@ class Interferometer(object):
         plt.close(fig)
 
     def plot_time_domain_data(
-            self, outdir='.', label=None, bandpass_frequencies=(50, 250),
-            notches=None, start_end=None, t0=None):
+        self, outdir='.', label=None, bandpass_frequencies=(50, 250),
+        notches=None, start_end=None, t0=None, crop=0, whiten=True,
+    ):
         """ Plots the strain data in the time domain
 
         Parameters
@@ -838,30 +839,44 @@ class Interferometer(object):
         # We use the gwpy timeseries to perform bandpass and notching
         if notches is None:
             notches = list()
-        timeseries = TimeSeries(
-            data=self.strain_data.time_domain_strain, times=self.strain_data.time_array)
-        zpks = []
-        if bandpass_frequencies is not None:
-            zpks.append(bandpass(
-                bandpass_frequencies[0], bandpass_frequencies[1],
-                self.strain_data.sampling_frequency))
-        if notches is not None:
-            for line in notches:
-                zpks.append(notch(
-                    line, self.strain_data.sampling_frequency))
-        if len(zpks) > 0:
-            zpk = concatenate_zpks(*zpks)
-            strain = timeseries.filter(zpk, filtfilt=False)
+        if whiten:
+            strain = TimeSeries(
+                data=self.whitened_time_domain_strain, times=self.strain_data.time_array
+            )
         else:
-            strain = timeseries
+            timeseries = TimeSeries(
+                data=self.strain_data.time_domain_strain, times=self.strain_data.time_array
+            )
+            zpks = []
+            if bandpass_frequencies is not None:
+                zpks.append(bandpass(
+                    bandpass_frequencies[0], bandpass_frequencies[1],
+                    self.strain_data.sampling_frequency))
+            if notches is not None:
+                for line in notches:
+                    zpks.append(notch(
+                        line, self.strain_data.sampling_frequency))
+            if len(zpks) > 0:
+                zpk = concatenate_zpks(*zpks)
+                strain = timeseries.filter(zpk, filtfilt=False)
+            else:
+                strain = timeseries
+
+        if crop > 0:
+            strain = strain.crop(
+                strain.t0.value + crop,
+                strain.t0.value + strain.duration.value - crop
+            )
 
         fig, ax = plt.subplots()
 
         if t0:
-            x = self.strain_data.time_array - t0
+            x = strain.times.value - t0
+            # x = self.strain_data.time_array - t0
             xlabel = 'GPS time [s] - {}'.format(t0)
         else:
-            x = self.strain_data.time_array
+            x = strain.times.value
+            # x = self.strain_data.time_array
             xlabel = 'GPS time [s]'
 
         ax.plot(x, strain)
