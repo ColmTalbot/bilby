@@ -112,7 +112,7 @@ def env_package_list(as_dataframe=False):
                 "--prefix", prefix,
                 "--json"
             ]))
-        except (FileNotFoundError, subprocess.CalledProcessError):
+        except (FileNotFoundError, subprocess.CalledProcessError, OSError):
             # When a conda env is in use but conda is unavailable
             conda_detected = False
 
@@ -120,18 +120,18 @@ def env_package_list(as_dataframe=False):
     if not conda_detected:
         try:
             import pip  # noqa: F401
-        except ModuleNotFoundError:  # no pip?
-            # not a conda environment, and no pip, so just return
-            # the list of loaded modules
-            modules = loaded_modules_dict()
-            pkgs = [{"name": x, "version": y} for x, y in modules.items()]
-        else:
             pkgs = json.loads(subprocess.check_output([
                 sys.executable,
                 "-m", "pip",
                 "list", "installed",
                 "--format", "json",
             ]))
+        except (ModuleNotFoundError, OSError):
+            # not a conda environment, and no pip,
+            # or can't launch subprocesses so just return
+            # the list of loaded modules
+            modules = loaded_modules_dict()
+            pkgs = [{"name": x, "version": y} for x, y in modules.items()]
 
     # convert to recarray for storage
     if as_dataframe:
