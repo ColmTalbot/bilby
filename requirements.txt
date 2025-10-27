@@ -1,5 +1,5 @@
 bilby_rust
-dynesty>=2.0.1,<2.2
+dynesty>=2.0.1
 emcee
 corner
 numpy
