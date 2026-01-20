@@ -312,7 +312,8 @@ class Grid(object):
         if dimension == self.n_dims:
             current_point = tuple([[int(np.where(
                 parameters[name] ==
-                self.sample_points[name])[0])] for name in self.parameter_names])
+                self.sample_points[name]
+            )[0].item())] for name in self.parameter_names])
             self._ln_likelihood[current_point] = _safe_likelihood_call(
                 self.likelihood, parameters
             )

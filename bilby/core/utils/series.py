@@ -118,7 +118,7 @@ def create_frequency_series(sampling_frequency, duration):
 
     """
     _check_legal_sampling_frequency_and_duration(sampling_frequency, duration)
-    number_of_samples = int(np.round(duration * sampling_frequency))
+    number_of_samples = int(np.round(duration * sampling_frequency).item())
     number_of_frequencies = int(np.round(number_of_samples / 2) + 1)
 
     return np.linspace(start=0,
@@ -167,7 +167,7 @@ def create_white_noise(sampling_frequency, duration):
     from . import random
 
     number_of_samples = duration * sampling_frequency
-    number_of_samples = int(np.round(number_of_samples))
+    number_of_samples = int(np.round(number_of_samples).item())
 
     frequencies = create_frequency_series(sampling_frequency, duration)
 
