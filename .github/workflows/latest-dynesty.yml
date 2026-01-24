@@ -44,12 +44,17 @@ jobs:
         # activate env so that conda list shows the correct environment
         source $CONDA_PATH/bin/activate python${{ matrix.python.short-version }}
         python -m pip install .
+        python -m pip install pyinstrument
         python -m pip install git+https://github.com/joshspeagle/dynesty@master
         conda list --show-channel-urls
       shell: bash
     - name: Run unit tests
       run: |
-        python -m pytest --durations 10 -k dynesty
+        pyinstrument -r html -o instrument.html -m pytest --durations 10 -k dynesty
     - name: Run sampler tests
       run: |
         python -m pytest test/integration/sampler_run_test.py --durations 10 -v -k dynesty
+    - uses: actions/upload-artifact@v4
+      with:
+        name: profiling
+        path: instrument.html
