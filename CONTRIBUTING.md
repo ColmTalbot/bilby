@@ -465,9 +465,9 @@ Below, we give a schematic of how the code is structured. This is intended to
 help orient users and make it easier to contribute. The layout is intended to
 define the logic of the code and new pull requests should aim to fit within
 this logic (unless there is a good argument to change it). For example, code
-which adds a new sampler should not effect the gravitational-wave specific
-parts of the code. Note that this document is not programmatically generated and
-so may get out of date with time. If you notice something wrong, please open an
+that adds a new prior class to the core package should not effect the gravitational-wave
+specific parts of the code. Note that this document is not programmatically generated
+and so may get out of date with time. If you notice something wrong, please open an
 issue.
 
 ![bilby overview](https://raw.githubusercontent.com/bilby-dev/bilby/main/docs/images/bilby_layout.png)
